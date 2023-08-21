@@ -11,6 +11,7 @@
 # include <fstream>
 # include <random>
 # include <memory>
+#include <utility>
 
 # include "utils.cuh"
 # include "kernels.cuh"
@@ -77,7 +78,7 @@ namespace cuDL {
         void uniformInit() {
             std::random_device rd;
             std::mt19937 gen(rd());
-            float range = std::sqrt(6.f / w());
+            float range = std::sqrt(1.f / w());
             std::uniform_real_distribution<> dis(-range, range);
 
             for (int i = 0; i < size(); ++i)
@@ -100,9 +101,13 @@ namespace cuDL {
         void printMem() {
             printf("\n");
             for (int n = 0; n < size(); ++n) {
-                printf("%8.4f, ", cpu()[n]);
+                printf("%12.10f, ", cpu()[n]);
             }
             printf("\n");
+        }
+
+        void printShape() {
+            printf("(%d, %d, %d, %d)\n", n_, c_, h_, w_);
         }
 
         ~Tensor() {
@@ -164,6 +169,63 @@ namespace cuDL {
         int c() const { return c_; }
         int h() const { return h_; }
         int w() const { return w_; }
+    };
+
+    class MerticsLogger {
+    private:
+        int maxEpoch;
+        int maxStep;
+        int logFreq;
+        float accSum_ = 0.f;
+        float lossSum_ = 0.f;
+        int n_ = 0;
+
+        std::vector<float> losses_;
+        std::vector<float> accs_;
+
+    public:
+        MerticsLogger(int maxEpoch, int maxStep, int logFreq) : maxEpoch(maxEpoch), maxStep(maxStep), logFreq(logFreq) {}
+
+        void newEpoch() {
+            losses_.push_back(lossSum_ / n_);
+            accs_.push_back(accSum_ / n_);
+            accSum_ = 0.f;
+            lossSum_ = 0.f;
+            n_ = 0;
+            printf("[Info] Epoch avg loss: %7.4f, avg acc: %5.2f.\n", losses_[losses_.size() - 1], accs_[accs_.size() - 1]);
+        }
+
+        void log(int epoch, int step, float lossValue, std::shared_ptr<Tensor> predicts, std::shared_ptr<Tensor> labels) {
+            n_++;
+            accSum_ += getAccurary(std::move(predicts), std::move(labels));
+            lossSum_ += lossValue;
+
+            if (step % logFreq == 0) {
+                lossValue = lossSum_ / n_;
+                float acc = 100 * accSum_ / n_;
+                printf("[Info] Train epoch [%3d/%3d], step [%4d/%4d], loss: %7.4f, acc: %5.2f.\n", maxEpoch, epoch,
+                       maxStep, step, lossValue, acc);
+            }
+        }
+
+        static float getAccurary(std::shared_ptr<Tensor> predicts, std::shared_ptr<Tensor> labels) {
+            int maxIdx, label;
+            float rightCnt = 0.f, maxLogit, logit;
+            for (int b = 0; b < predicts->n(); ++b) {
+                label = (int)labels->cpu()[b];
+                maxIdx = -1;
+                maxLogit = 0.f;
+                for (int i = 0; i < predicts->w(); ++i) {
+                    logit = predicts->getItem(b, 0, 0, i);
+                    if (maxLogit < logit) {
+                        maxLogit = logit;
+                        maxIdx = i;
+                    }
+                }
+                if (maxIdx == label) ++rightCnt;
+            }
+            return rightCnt / predicts->n();
+        }
     };
 }
 

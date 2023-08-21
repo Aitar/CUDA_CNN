@@ -20,8 +20,6 @@ namespace cuDL {
 
         virtual int getLen() = 0;
 
-        virtual ~Dataset() = 0;
-
         int itemSize() { return c_ * h_ * w_; };
 
         float getLabel(int index) { return labels_[index]; }
@@ -50,7 +48,7 @@ namespace cuDL {
             }
         }
 
-        std::pair<std::shared_ptr<Tensor>, std::shared_ptr<Tensor>> getData(int &step) {
+        std::array<std::shared_ptr<Tensor>, 2> getData(int &step) {
             int offset = step * batchSize_;
             int n = std::min(batchSize_, dataset_->getLen() - offset);
             auto data = std::make_shared<Tensor>(batchSize_, dataset_->c_, dataset_->h_, dataset_->w_);
@@ -60,7 +58,8 @@ namespace cuDL {
                 dataset_->getItem(data->cpu() + i * dataset_->itemSize(), idx);
                 labels->cpu()[i] = dataset_->getLabel(idx);
             }
-            auto res = std::pair(std::move(data), std::move(labels));
+            std::array<std::shared_ptr<Tensor>, 2> res = {data, labels};
+//            auto res = std::pair(std::move(data), std::move(labels));
             return res;
         }
     };

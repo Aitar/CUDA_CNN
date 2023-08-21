@@ -5,6 +5,8 @@
 #ifndef MYNN_MNIST_H
 #define MYNN_MNIST_H
 
+#include <utility>
+
 #include "src/Tensor.h"
 #include "src/module.h"
 #include "src/Layer.h"
@@ -18,14 +20,16 @@ namespace cuDL{
         std::string labelPath_;
         std::string dataPath_;
 
-        MNIST(const std::string &labelPath, const std::string &dataPath) :
-                labelPath_(labelPath), dataPath_(dataPath) {
+        MNIST(std::string dataPath, std::string labelPath) :
+                labelPath_(std::move(labelPath)), dataPath_(std::move(dataPath)) {
             c_ = 1;
-            loadLabels();
             loadData();
+            loadLabels();
         }
 
+
         void loadLabels() {
+            std::cout << "[Info] Loading \"" << labelPath_ << "\"...";
             uint8_t ptr[4];
             std::ifstream file(labelPath_.c_str(), std::ios::in | std::ios::binary);
 
@@ -45,16 +49,14 @@ namespace cuDL{
                 file.read((char *) ptr, 1);
                 labels_.push_back(static_cast<float>(ptr[0]));
             }
-
+            printf("success.\n");
             file.close();
         }
 
         void loadData() {
-            int num_steps_ = 0;
-
+            std::cout << "[Info] Loading \"" << dataPath_ << "\"...";
             uint8_t ptr[4];
 
-            printf("loading %s", dataPath_.c_str());
             std::ifstream file(dataPath_.c_str(), std::ios::in | std::ios::binary);
             if (!file.is_open()) {
                 printf("[Error] Open file failed, check file path.\n");
@@ -64,7 +66,6 @@ namespace cuDL{
             file.read((char *) ptr, 4);
             int magic = toInt(ptr);
             assert((magic & 0xFFF) == 0x803);
-
 
             file.read((char *) ptr, 4);
             int num = toInt(ptr);
@@ -91,6 +92,7 @@ namespace cuDL{
             delete[] q;
 
             file.close();
+            std::cout << "success." << std::endl;
         }
 
         void getItem(float *dataPtr, int index) override {
@@ -110,15 +112,15 @@ namespace cuDL{
 
         Net(int nClass) : nClass_(nClass) {
             loss_ = std::make_shared<Softmax>();
-            addLayer("conv1", std::make_shared<Conv2D>(1, 10, 5));
-            addLayer("max_pool1", std::make_shared<MaxPooling>(2));
+            addLayer("conv1", std::make_shared<Conv2D>(1, 6, 5));
+            addLayer("max_pool1", std::make_shared<MaxPooling>(3));
             addLayer("relu1", std::make_shared<ReLU>());
-            addLayer("conv2", std::make_shared<Conv2D>(10, 20, 5));
-            addLayer("max_pool2", std::make_shared<MaxPooling>(2));
+            addLayer("conv2", std::make_shared<Conv2D>(6, 2, 5));
+            addLayer("max_pool2", std::make_shared<MaxPooling>(3));
             addLayer("relu2", std::make_shared<ReLU>());
-            addLayer("fc1", std::make_shared<Linear>(320, 50));
+            addLayer("fc1", std::make_shared<Linear>(512, 256));
             addLayer("relu3", std::make_shared<ReLU>());
-            addLayer("fc2", std::make_shared<Linear>(50, nClass));
+            addLayer("fc2", std::make_shared<Linear>(256, nClass));
             addLayer("softmax", loss_);
         }
 

@@ -4,6 +4,9 @@
 
 #include <cublas_v2.h>
 #include <cudnn_v8.h>
+#include <memory>
+#include "Tensor.h"
+
 
 #define CUDACHECK(op) cudaCheck((op), #op, __FILE__, __LINE__)
 #define CUBLASCHECK(op) cublasCheck((op), #op, __FILE__, __LINE__)

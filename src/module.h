@@ -1,5 +1,5 @@
 //
-// Created by didi on 2023/8/20.
+// Created by Aitar Hwan on 2023/3/11.
 //
 
 #ifndef MYNN_MODULE_H
@@ -16,6 +16,7 @@ namespace cuDL {
         std::shared_ptr <Softmax> loss_ = nullptr;
         std::shared_ptr <CudaContext> cudaCtx_;
 
+        bool isInit_ = false;
         bool isTrain_{};
         float lr_{};
     public:
@@ -26,9 +27,11 @@ namespace cuDL {
         void infer() { isTrain_ = false; }
 
         void init(std::shared_ptr <CudaContext> cudaCtx) {
-            cudaCtx_ = cudaCtx;
-            for (auto &layer: layers_) {
-                layer.second->setCudaContext(cudaCtx_);
+            if (!isInit_) {
+                cudaCtx_ = cudaCtx;
+                for (auto &layer: layers_) {
+                    layer.second->setCudaContext(cudaCtx_);
+                }
             }
         }
 
@@ -51,11 +54,17 @@ namespace cuDL {
                 std::shared_ptr<Tensor> grad = nullptr;
                 for (auto it = sequence_.rbegin(); it != sequence_.rend(); ++it) {
                     grad = it->get()->backward(grad);
-                    it->get()->updateParams(lr_);
+                    if (it->get()->hasParams_)
+                        it->get()->updateParams(lr_);
                 }
             }
             return lossValue;
         };
+
+        void print() {
+            for (auto layer: sequence_)
+                layer->print();
+        }
     };
 }
 

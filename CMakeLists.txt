@@ -3,6 +3,12 @@ project(cuda_cnn CUDA)
 
 set(CMAKE_CUDA_STANDARD 17)
 
+find_program(CCACHE_FOUND ccache)
+if(CCACHE_FOUND)
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK ccache)
+endif(CCACHE_FOUND)
+
 set(CUDNN_INCLUDE_DIR /nfs/volume-73-1/huangdingli/my_workspace/cuda/cudnn/include)
 set(CUDNN_LIBRARY /nfs/volume-73-1/huangdingli/my_workspace/cuda/cudnn/lib)
 set(CUDA_INCLUDE /usr/local/cuda-11.3/include)
@@ -24,4 +30,4 @@ add_executable(cuda_cnn main.cu
 
 target_link_libraries(cuda_cnn cudnn cublas)
 
-set_target_properties(cuda_cnn PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+#set_target_properties(cuda_cnn PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

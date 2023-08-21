@@ -128,7 +128,7 @@ namespace cuDL {
             }
 
             for (int step = 0; step < IPT; ++step) {
-                y[(idx << IPT_SHIFE) + step] = yTmp[step];
+                y[(idx << IPT_SHIFE) + step] = yTmp[step] > 0 ? yTmp[step] : 0.f;
             }
         }
     }

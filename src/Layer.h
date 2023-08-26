@@ -653,6 +653,63 @@ namespace cuDL {
             name_ = "ReLU_" + std::to_string(globalID++);
         }
     };
+
+    class BatchNorm: public Layer {
+    public:
+        std::shared_ptr<Tensor> gamma_ = nullptr;
+        std::shared_ptr<Tensor> beta_ = nullptr;
+        int channels_ = 0;
+
+        BatchNorm(int channels): channels_(channels) {
+            gamma_ = std::make_shared<Tensor>(1, 1, 1, channels);
+            beta_ = std::make_shared<Tensor>(1, 1, 1, channels);
+            gamma_->valueInit(1.f);
+            beta_->valueInit(0.f);
+        }
+
+        void init(std::shared_ptr<Tensor> inputs) override {
+            if (isInit) return;
+            Layer::init(inputs);
+            outputs_ = std::make_shared<Tensor>(inputs_);
+        }
+
+        std::shared_ptr<Tensor> forward(std::shared_ptr<Tensor> inputs) override {
+            init(inputs);
+            int size = outputs_->h() * outputs_->w();
+            float alpha = 1 / (float) size, cmean, cvar, sttd;
+            for (int c = 0; c < outputs_->c(); ++c) {
+                cmean = 0.f;
+                cvar = 0.f;
+                for (int n = 0; n < outputs_->n(); ++n)
+                    cmean += reduceSumVector(outputs_->gpu() + n * outputs_->len() + c * size,
+                                    size,
+                                    alpha);
+                cmean /= (float) outputs_->n();
+                for (int n = 0; n < outputs_->n(); ++n)
+                    cvar += reduceSumVector(outputs_->gpu() + n * outputs_->len() + c * size,
+                                            size,
+                                            alpha,
+                                            cmean,
+                                            2.f);
+                cvar /= (float) outputs_->n();
+                sttd = pow(cvar, -0.5);
+                for (int n = 0; n < outputs_->n(); ++n) {
+                    vectorValueSum(sttd,
+                                   outputs_->gpu() + n * outputs_->len() + c * size,
+                                   sttd * cmean,
+                                   size);
+                }
+            }
+
+            return outputs_;
+        }
+
+        std::shared_ptr<Tensor> backward(std::shared_ptr<Tensor> grads) override {
+            return nullptr;
+        }
+
+        ~BatchNorm() = default;
+    };
 };
 
 #endif //MYNN_LAYER_H

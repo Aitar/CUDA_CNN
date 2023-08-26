@@ -26,6 +26,8 @@ add_executable(cuda_cnn main.cu
         mnist.h
         src/Tensor.h
         src/module.h
+        src/op.h
+        src/autograd.h
 )
 
 target_link_libraries(cuda_cnn cudnn cublas)

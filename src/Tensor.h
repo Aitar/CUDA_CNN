@@ -114,6 +114,15 @@ namespace cuDL {
             tensorFree();
         }
 
+        void copy(const std::shared_ptr<Tensor>& tensor) {
+            if (tensor->device_ == GPU) {
+                cudaMemcpy(gpu_, tensor->gpu_, tensor->memSize(), cudaMemcpyDeviceToDevice);
+                cudaDeviceSynchronize();
+            } else {
+                memcpy(cpu_, tensor->cpu_, tensor->memSize());
+            }
+        }
+
         float* cpu() {
             if (device_ == GPU) {
                 cudaMemcpy(cpu_, gpu_, sizeof(float) * size(), cudaMemcpyDeviceToHost);

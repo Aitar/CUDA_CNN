@@ -15,9 +15,9 @@
 # include <random>
 # include <algorithm>
 
-
 # include "Tensor.h"
 # include "utils.cuh"
+# include "autograd.h"
 
 namespace cuDL {
     static int globalID = 0;
@@ -25,10 +25,10 @@ namespace cuDL {
     class Layer {
     protected:
         std::string name_;
-        std::shared_ptr <Tensor> outputs_ = nullptr;          // 需要根据batchSize初始化
-        std::shared_ptr <Tensor> inputs_ = nullptr;
-        std::shared_ptr <Tensor> inputGrads_ = nullptr;
-        std::shared_ptr <Tensor> outputsGrads_ = nullptr;
+        tensorSp outputs_ = nullptr;          // 需要根据batchSize初始化
+        tensorSp inputs_ = nullptr;
+        tensorSp inputGrads_ = nullptr;
+        tensorSp outputsGrads_ = nullptr;
         std::shared_ptr <CudaContext> cudaCtx_ = nullptr;
         std::map <std::shared_ptr<Tensor>, std::shared_ptr<Tensor>> parmas_;
         cudaStream_t stream_{};
@@ -36,15 +36,18 @@ namespace cuDL {
         int batchSize_ = 0;
         bool isInit = false;
         bool hasParams_ = false;
+        bool autoGrad = false;
 
         friend class Module;
 
     public:
-        virtual std::shared_ptr <Tensor> forward(std::shared_ptr <Tensor> inputs) = 0;
+        virtual tensorSp forward(tensorSp inputs) = 0;
 
-        virtual std::shared_ptr <Tensor> backward(std::shared_ptr <Tensor> grads) = 0;
+        virtual tensorSp backward(tensorSp grads) = 0;
 
-        virtual void init(std::shared_ptr <Tensor> inputs) {
+//        virtual nodes forward(nodes inputs) = 0;
+
+        virtual void init(tensorSp inputs) {
             isInit = true;
             inputs_ = std::move(inputs);
             batchSize_ = inputs_->n();
@@ -58,7 +61,7 @@ namespace cuDL {
                 return;
             }
             for (auto &param: parmas_)
-                vectorSum(lr, param.second->gpu(), 1.f, param.first->gpu(), param.first->size());
+                vectorAdd(lr, param.second->gpu(), 1.f, param.first->gpu(), param.first->size());
 
             cudaDeviceSynchronize();
         }
@@ -74,14 +77,17 @@ namespace cuDL {
 
     class Linear : public Layer {
     public:
-        std::shared_ptr <Tensor> weight_ = nullptr;  // (1, 1, inSize_, outSize_)
-        std::shared_ptr <Tensor> bias_ = nullptr;
-        std::shared_ptr <Tensor> wGrad_ = nullptr;
-        std::shared_ptr <Tensor> bGrad_ = nullptr;
+        tensorSp weight_ = nullptr;  // (1, 1, inSize_, outSize_)
+        tensorSp bias_ = nullptr;
+        tensorSp wGrad_ = nullptr;
+        tensorSp bGrad_ = nullptr;
+        idenSp weightNode = nullptr;
+        idenSp biasNode = nullptr;
+
         int inSize_ = 0;
         int outSize_ = 0;
 
-        void init(std::shared_ptr <Tensor> inputs) override {
+        void init(tensorSp inputs) override {
             if (isInit) return;
 //            printf("\nLinear init...");
             Layer::init(inputs);
@@ -100,6 +106,9 @@ namespace cuDL {
             parmas_[weight_] = wGrad_;
             parmas_[bias_] = bGrad_;
 
+            weightNode = make_shared<Identity>(weight_, wGrad_);
+            biasNode = make_shared<Identity>(bias_, bGrad_);
+
 //            printf("success!\n");
         }
 
@@ -112,16 +121,17 @@ namespace cuDL {
 
         ~Linear() = default;
 
-        std::shared_ptr <Tensor> forward(std::shared_ptr <Tensor> inputs) override {
+        tensorSp forward(tensorSp inputs) override {
             if (inputs->len() != inSize_)
                 printf("\nShape dismatch, expect %d but got %d\n", inSize_, inputs->size());
 
             init(inputs);
-            inputs_->reshape(1, 1, inputs_->c() * inputs_->h() * inputs_->w());
-//            printf("\nLinear forward...");
+            //            printf("\nLinear forward...");
 
-            // YT = WT * XT + BT
-            // WT: O * I, XT: I * N, YT = O * N
+                inputs_->reshape(1, 1, inputs_->c() * inputs_->h() * inputs_->w());
+
+                // YT = WT * XT + BT
+                // WT: O * I, XT: I * N, YT = O * N
             CUBLASCHECK(cublasSgemm_v2(cudaCtx_->cublas_,
                                        CUBLAS_OP_N, CUBLAS_OP_N,
                                        outSize_, batchSize_, inSize_,
@@ -135,7 +145,7 @@ namespace cuDL {
             return outputs_;
         }
 
-        std::shared_ptr <Tensor> backward(std::shared_ptr <Tensor> grads) override {
+        tensorSp backward(tensorSp grads) override {
 //            printf("\nLinear backward...");
 
             // db = dy
@@ -164,6 +174,8 @@ namespace cuDL {
 //            printf("success!\n");
             return inputGrads_;
         }
+
+
 
         void print() override {
             cudaDeviceSynchronize();
@@ -195,10 +207,10 @@ namespace cuDL {
 
     class Conv2D : public Layer {
     private:
-        std::shared_ptr <Tensor> kernel_ = nullptr;
-        std::shared_ptr <Tensor> bias_ = nullptr;
-        std::shared_ptr <Tensor> kernelGrads_ = nullptr;
-        std::shared_ptr <Tensor> biasGrads_ = nullptr;
+        tensorSp kernel_ = nullptr;
+        tensorSp bias_ = nullptr;
+        tensorSp kernelGrads_ = nullptr;
+        tensorSp biasGrads_ = nullptr;
 
         cudnnFilterDescriptor_t filterDesc_{};
         cudnnConvolutionDescriptor_t convDesc_{};
@@ -256,8 +268,6 @@ namespace cuDL {
         }
 
         void setWorkspace() {
-//            std::cout << "\nConv set workspace...";
-
             /** MaxCount -> v7(find best) -> WorkSpace
              *  遍历一遍找到最合适的算法，并设置workspace大小
              */
@@ -331,13 +341,10 @@ namespace cuDL {
                     CUDACHECK(cudaFree(workspace_));
                 CUDACHECK(cudaMalloc((void **) &workspace_, workspaceSize_));
             }
-//            printf("success\n");
         }
 
-        void init(std::shared_ptr <Tensor> inputs) override {
+        void init(tensorSp inputs) override {
             if (isInit) return;
-
-//            printf("\nConv init...");
 
             Layer::init(inputs);
             inputH_ = inputs->h();
@@ -364,7 +371,6 @@ namespace cuDL {
                                                   CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW,
                                                   outChannels_, inChannels_, kernelSize_, kernelSize_));
 
-//            printf("success\n");
             setWorkspace();
         }
 
@@ -387,7 +393,7 @@ namespace cuDL {
             else printf("not init yet\n");
         }
 
-        std::shared_ptr <Tensor> forward(std::shared_ptr <Tensor> inputs) override {
+        tensorSp forward(tensorSp inputs) override {
             init(inputs);
 //            printf("\nConv forward...");
             CUDNNCHECK(cudnnConvolutionForward(cudaCtx_->cudnn_,
@@ -404,7 +410,7 @@ namespace cuDL {
             return outputs_;
         }
 
-        std::shared_ptr <Tensor> backward(std::shared_ptr <Tensor> grads) override {
+        tensorSp backward(tensorSp grads) override {
             outputsGrads_ = std::move(grads);
 
             CUDNNCHECK(cudnnConvolutionBackwardBias(cudaCtx_->cudnn_,
@@ -456,7 +462,7 @@ namespace cuDL {
             cudnnDestroyPoolingDescriptor(poolingDesc_);
         }
 
-        void init(std::shared_ptr <Tensor> inputs) override {
+        void init(tensorSp inputs) override {
             if (isInit) return;
 
 //            printf("\nPooling init...");
@@ -470,7 +476,7 @@ namespace cuDL {
 //            printf("Success\n");
         }
 
-        std::shared_ptr <Tensor> forward(std::shared_ptr <Tensor> inputs) override {
+        tensorSp forward(tensorSp inputs) override {
             init(inputs);
 //            printf("\nPooling forward...");
             CUDNNCHECK(cudnnPoolingForward(cudaCtx_->cudnn_, poolingDesc_,
@@ -480,7 +486,7 @@ namespace cuDL {
             return outputs_;
         }
 
-        std::shared_ptr <Tensor> backward(std::shared_ptr <Tensor> grads) override {
+        tensorSp backward(tensorSp grads) override {
             outputsGrads_ = std::move(grads);
             CUDNNCHECK(cudnnPoolingBackward(cudaCtx_->cudnn_, poolingDesc_,
                                             &cudaCtx_->one,
@@ -518,13 +524,13 @@ namespace cuDL {
     class Softmax : public Layer {
     public:
         int size_ = 0;
-        std::shared_ptr <Tensor> loss_;
+        tensorSp loss_;
 
         Softmax() {
             name_ = "Softmax_" + std::to_string(globalID++);
         }
 
-        void init(std::shared_ptr <Tensor> inputs) override {
+        void init(tensorSp inputs) override {
             if (isInit) return;
 
             Layer::init(inputs);
@@ -536,7 +542,7 @@ namespace cuDL {
             loss_->valueInit();
         }
 
-        std::shared_ptr <Tensor> forward(std::shared_ptr <Tensor> inputs) override {
+        tensorSp forward(tensorSp inputs) override {
             init(inputs);
 //            std::cout << "[Info] Softmax forward...";
             CUDNNCHECK(cudnnSoftmaxForward(cudaCtx_->cudnn_,
@@ -549,7 +555,7 @@ namespace cuDL {
             return outputs_;
         }
 
-        float getLoss(const std::shared_ptr <Tensor> &labels) {
+        float getLoss(const tensorSp &labels) {
             float loss = 0.f;
             for (int i = 0; i < outputs_->n(); ++i) {
                 dSoftmax(inputGrads_->gpu() + i * outputs_->len(),
@@ -559,7 +565,7 @@ namespace cuDL {
                          (int) labels->cpu()[i]);
                 loss -= std::log(outputs_->getItem(i, 0, 0, (int) labels->cpu()[i]) + 1e-5);
             }
-            return loss / outputs_->n();
+            return loss / (float) outputs_->n();
         }
 
 //        std::shared_ptr<Tensor> forwardAndLCE(std::shared_ptr<Tensor> tensor, std::shared_ptr<Tensor> labels) {
@@ -575,7 +581,7 @@ namespace cuDL {
 //            return res;
 //        }
 
-        std::shared_ptr <Tensor> backward(std::shared_ptr <Tensor> grads) override {
+        tensorSp backward(tensorSp grads) override {
             if (grads != nullptr) {
                 printf("[Warning] Softmax backward only accept nullptr.\n");
                 return nullptr;
@@ -583,7 +589,7 @@ namespace cuDL {
             return inputGrads_;
         }
 
-        void print() {
+        void print() override {
             printf("\n%s", name_.c_str());
             printf("\ninputGrads:");
             if (inputGrads_ != nullptr) inputGrads_->print();
@@ -609,7 +615,7 @@ namespace cuDL {
                                          coef_);
         }
 
-        void init(std::shared_ptr <Tensor> inputs) override {
+        void init(tensorSp inputs) override {
             if (isInit) return;
             Layer::init(inputs);
             outputs_ = std::make_shared<Tensor>(inputs_->n(), inputs_->c(), inputs_->h(), inputs_->w());
@@ -618,7 +624,7 @@ namespace cuDL {
             inputGrads_->valueInit();
         }
 
-        std::shared_ptr <Tensor> forward(std::shared_ptr <Tensor> inputs) override {
+        tensorSp forward(tensorSp inputs) override {
             init(inputs);
 
             cudnnActivationForward(cudaCtx_->cudnn_,
@@ -629,7 +635,7 @@ namespace cuDL {
             return outputs_;
         }
 
-        std::shared_ptr <Tensor> backward(std::shared_ptr <Tensor> grads) override {
+        tensorSp backward(tensorSp grads) override {
             outputsGrads_ = std::move(grads);
             cudnnActivationBackward(cudaCtx_->cudnn_,
                                     actDesc_,
@@ -681,12 +687,12 @@ namespace cuDL {
                 cmean = 0.f;
                 cvar = 0.f;
                 for (int n = 0; n < outputs_->n(); ++n)
-                    cmean += reduceSumVector(outputs_->gpu() + n * outputs_->len() + c * size,
+                    cmean += vectorSum(outputs_->gpu() + n * outputs_->len() + c * size,
                                     size,
                                     alpha);
                 cmean /= (float) outputs_->n();
                 for (int n = 0; n < outputs_->n(); ++n)
-                    cvar += reduceSumVector(outputs_->gpu() + n * outputs_->len() + c * size,
+                    cvar += vectorSum(outputs_->gpu() + n * outputs_->len() + c * size,
                                             size,
                                             alpha,
                                             cmean,
@@ -694,7 +700,7 @@ namespace cuDL {
                 cvar /= (float) outputs_->n();
                 sttd = pow(cvar, -0.5);
                 for (int n = 0; n < outputs_->n(); ++n) {
-                    vectorValueSum(sttd,
+                    vectorValueAdd(sttd,
                                    outputs_->gpu() + n * outputs_->len() + c * size,
                                    sttd * cmean,
                                    size);

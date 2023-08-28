@@ -40,9 +40,8 @@ namespace cuDL {
             c_ = c;
             h_ = h;
             w_ = w;
+
             cpu_ = new float[n * c * w * h];
-            if (arr != nullptr)
-                arrayInit(arr);
             CUDACHECK(cudaMalloc(&gpu_, sizeof(float) * n * c * h * w));
             CUDNNCHECK(cudnnCreateTensorDescriptor(&desc_));
             CUDNNCHECK(cudnnSetTensor4dDescriptor(desc_, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, n, c, h, w));
@@ -51,18 +50,16 @@ namespace cuDL {
     public:
         cudnnTensorDescriptor_t desc_{};
 
-        Tensor(int n, int c, int h, int w) {
-            tensorInit(n, c, h, w);
+        Tensor(int n, int c, int h, int w, float* arr=nullptr) {
+            tensorInit(n, c, h, w, arr);
+            if (arr != nullptr) arrayInit(arr);
+            else valueInit();
         }
 
         Tensor(std::shared_ptr<Tensor> tensor, int dup=1) {
-            tensorInit(tensor->n() * dup, tensor->c(), tensor->h(), tensor->w());
+            tensorInit(tensor->n(), tensor->c() * dup, tensor->h(), tensor->w());
             for (int i = 0; i < dup; ++i)
                 cudaMemcpyAsync(gpu() + i * tensor->size(), tensor->gpu(), tensor->memSize(), cudaMemcpyDeviceToDevice);
-        }
-
-        Tensor(int n, int c, int h, int w, float* arr) {
-            tensorInit(n, c, h, w, arr);
         }
 
         void valueInit(float value=0.f) {
@@ -114,12 +111,14 @@ namespace cuDL {
             tensorFree();
         }
 
-        void copy(const std::shared_ptr<Tensor>& tensor) {
-            if (tensor->device_ == GPU) {
-                cudaMemcpy(gpu_, tensor->gpu_, tensor->memSize(), cudaMemcpyDeviceToDevice);
-                cudaDeviceSynchronize();
-            } else {
-                memcpy(cpu_, tensor->cpu_, tensor->memSize());
+        void copy(const std::shared_ptr<Tensor>& tensor, int dup=1) {
+            for (int i = 0; i < dup; ++i) {
+                if (tensor->device_ == GPU) {
+                    cudaMemcpy(gpu_ + i * tensor->size(), tensor->gpu_, tensor->memSize(), cudaMemcpyDeviceToDevice);
+                    cudaDeviceSynchronize();
+                } else {
+                    memcpy(cpu_ + i * tensor->size(), tensor->cpu_, tensor->memSize());
+                }
             }
         }
 
@@ -236,6 +235,9 @@ namespace cuDL {
             return rightCnt / predicts->n();
         }
     };
+
+    typedef std::shared_ptr<Tensor> tensorSp;
+    typedef std::vector<std::shared_ptr<Tensor>> tensors;
 }
 
 #endif //MYNN_TENSOR_H

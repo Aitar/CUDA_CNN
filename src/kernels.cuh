@@ -52,7 +52,8 @@ namespace cuDL {
         cudaStreamSynchronize(stream);
     }
 
-    __global__ void reduceSumKernel(float* x, int n, float alpha, float bias, float p) {
+
+    __global__ void vectorSumKernel(float* x, int n, float alpha, float bias, float p) {
         uint nThread = blockIdx.x * blockDim.x;
         uint idx = nThread + threadIdx.x;
         float input[IPT] = {0.f};
@@ -84,29 +85,23 @@ namespace cuDL {
             x[blockIdx.x] = smem[0];
     }
 
-    float reduceSumVector(float* x, int n, float alpha=1.f, float bias=0.f, float p=1.f, cudaStream_t stream=0) {
+    void vectorSum(float* x, float* res, int n, float alpha=1.f, float bias=0.f, float p=1.f, cudaStream_t stream=0) {
         float* copy = nullptr;
-        float out = 0.f;
         cudaMallocAsync(&copy, sizeof(float) * n, stream);
         cudaMemcpyAsync(copy, x, sizeof(float) * n, cudaMemcpyDeviceToDevice, stream);
 
         int blockSize = BLOCKSIZE;
         int gridSize;
         int curSize = n;
-        while (curSize >= blockSize) {
+        do {
             gridSize = curSize / blockSize + 1;
-            reduceSumKernel<<<gridSize, blockSize, blockSize, stream>>>(copy, curSize, alpha, bias, p);
+            vectorSumKernel<<<gridSize, blockSize, blockSize, stream>>>(copy, curSize, alpha, bias, p);
             curSize = gridSize;
-        }
+        } while (curSize > 1);
 
-        blockSize = (curSize / IPT) + 1;
-        reduceSumKernel<<<1, blockSize, blockSize, stream>>>(copy, curSize, alpha, bias, p);
-
-        cudaMemcpyAsync(&out, copy, sizeof(float), cudaMemcpyDeviceToHost, stream);
-
+        cudaMemcpyAsync(&res, copy, sizeof(float), cudaMemcpyDeviceToHost, stream);
+        cudaFree(copy);
         cudaStreamSynchronize(stream);
-
-        return out;
     }
 
     __global__ void reduceSumExpKernel(float* x, int n) {
@@ -168,7 +163,7 @@ namespace cuDL {
     }
 
 
-    __global__ void vectorSumKernel(float alpha, const float* x, float beta, float* y, int n) {
+    __global__ void vectorAddKernel(float alpha, const float* x, float beta, float* y, int n) {
         uint idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (idx << IPT_SHIFE < n) {
             float xTmp[IPT];
@@ -190,14 +185,14 @@ namespace cuDL {
     }
 
     // y = alpha * x + beta * y
-    void vectorSum(float alpha, const float* x, float beta, float* y, int n, cudaStream_t stream=0) {
+    void vectorAdd(float alpha, const float* x, float beta, float* y, int n, cudaStream_t stream=0) {
         int blockSize = BLOCKSIZE;
         int gridSize = n / (blockSize << IPT_SHIFE) + 1;
-        vectorSumKernel<<<gridSize, blockSize, 0, stream>>>(alpha, x, beta, y, n);
+        vectorAddKernel<<<gridSize, blockSize, 0, stream>>>(alpha, x, beta, y, n);
     }
 
     // x = alpha * x + beta
-    __global__ void vectorValueSumKernel(float alpha, float* x, float beta, int n) {
+    __global__ void vectorValueAddKernel(float alpha, float* x, float beta, int n) {
         uint idx = blockIdx.x * blockDim.x + threadIdx.x;
         float input[IPT << 1] = {0.f};
         uint offset = idx * (IPT << 1);
@@ -211,10 +206,10 @@ namespace cuDL {
         }
     }
 
-    void vectorValueSum(float alpha, float* x, float beta, int n, cudaStream_t stream=nullptr) {
+    void vectorValueAdd(float alpha, float* x, float beta, int n, cudaStream_t stream=nullptr) {
         int blockSize = BLOCKSIZE;
         int gridSize = n / (blockSize * (IPT << 1)) + 1;
-        vectorValueSumKernel<<<gridSize, blockSize, 0, stream>>>(alpha, x, beta, n);
+        vectorValueAddKernel<<<gridSize, blockSize, 0, stream>>>(alpha, x, beta, n);
     }
 
     __global__ void hadamardPorductKernel(float alpha, int n, const float* A, const float* B, float *C) {

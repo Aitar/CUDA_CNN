@@ -26,7 +26,6 @@ add_executable(cuda_cnn main.cu
         mnist.h
         src/Tensor.h
         src/module.h
-        src/op.h
         src/autograd.h
 )
 

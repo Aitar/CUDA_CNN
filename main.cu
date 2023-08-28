@@ -2,48 +2,12 @@
 #include <queue>
 #include "mnist.h"
 #include "src/utils.cuh"
-#include "src/op.h"
+#include "src/autograd.h"
 
 using namespace std;
 using namespace cuDL;
 
 int main() {
-    auto cmp = [](const Tensor& a, const Tensor& b) {
-        return a.w() > b.w();
-    };
-    auto cuda_ = make_shared<CudaContext>();
-
-    priority_queue<Tensor, vector<Tensor>, decltype(cmp)> queue(cmp);
-    int m = 4, n = 3;
-    float aa[] = {
-            1, 2, 3,
-            4, 5, 6,
-            2, 3, 4,
-            7, 8, 9
-    };
-
-    float bb[] = {
-            1, 2, 3,
-            4, 5, 6,
-            2, 3, 4,
-            7, 8, 9
-    };
-
-
-    auto a = make_shared<Tensor>(1, 1, m, n, aa);
-    auto b = make_shared<Tensor>(1, 1, m, n, bb);
-    auto c = make_shared<Tensor>(1, 1, m, n);
-    a->print();
-    b->print();
-
-    cublasSgeam(cuda_->cublas_,
-                CUBLAS_OP_N, CUBLAS_OP_N,
-                m, n,
-                &cuda_->one, a->gpu(), m,
-                &cuda_->zero, b->gpu(), m,
-                c->gpu(), m);
-    c->print();
-
 //    const string trainDataPath = "/nfs/volume-73-1/huangdingli/my_workspace/cuda/myNN/data/train-images-idx3-ubyte";
 //    const string trainLabelPath = "/nfs/volume-73-1/huangdingli/my_workspace/cuda/myNN/data/train-labels-idx1-ubyte";
 //    const string testDataPath = "/nfs/volume-73-1/huangdingli/my_workspace/cuda/myNN/data/t10k-images-idx3-ubyte";

@@ -56,10 +56,16 @@ namespace cuDL {
             else valueInit();
         }
 
-        Tensor(std::shared_ptr<Tensor> tensor, int dup=1) {
+        Tensor(std::shared_ptr<Tensor> tensor, int dup=1, bool copy=true) {
             tensorInit(tensor->n(), tensor->c() * dup, tensor->h(), tensor->w());
-            for (int i = 0; i < dup; ++i)
-                cudaMemcpyAsync(gpu() + i * tensor->size(), tensor->gpu(), tensor->memSize(), cudaMemcpyDeviceToDevice);
+            if (copy) {
+                for (int i = 0; i < dup; ++i)
+                    cudaMemcpyAsync(gpu() + i * tensor->size(), tensor->gpu(), tensor->memSize(),
+                                    cudaMemcpyDeviceToDevice);
+
+            } else {
+                valueInit();
+            }
         }
 
         void valueInit(float value=0.f) {
@@ -85,11 +91,11 @@ namespace cuDL {
         void print() {
             for (int n = 0; n < n_; ++n) {
                 for (int c = 0; c < c_; ++c) {
-                    printf("\nN = %d, C = %d:\n", n, c);
+                    printf("N = %d, C = %d:\n", n, c);
                     for (int h = 0; h < h_; ++h) {
                         for (int w = 0; w < w_; ++w)
                             printf("%8.4f, ", getItem(n, c, h, w));
-                        printf("\n");
+                        printf("\n\n");
                     }
                 }
             }
@@ -170,6 +176,11 @@ namespace cuDL {
                   h * w_ +
                   w] = v;
         }
+
+        Device device() {
+            return device_;
+        }
+
         int size() const {return n_ * c_ * h_ * w_; }
         int len() const {return c_ * h_ * w_; }
         size_t memSize() const {return size() * sizeof(float); }

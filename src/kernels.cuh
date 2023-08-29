@@ -52,30 +52,27 @@ namespace cuDL {
         cudaStreamSynchronize(stream);
     }
 
-
     __global__ void vectorSumKernel(float* x, int n, float alpha, float bias, float p) {
-        uint nThread = blockIdx.x * blockDim.x;
-        uint idx = nThread + threadIdx.x;
+        unsigned int nThread = gridDim.x * blockDim.x;
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        extern __shared__ float smem[];
         float input[IPT] = {0.f};
         float buf[IPT] = {0.f};
-        extern __shared__ float smem[];        // size == nThread
 
-        for (uint i = idx; i < n; i += nThread * IPT) {
-            for (uint step = 0; step < IPT; ++step) {
-                if (i + step < n) {
-                    buf[step] = x[i + step];
-                    input[step] += alpha * pow(buf[step] - bias, p);
-                }
+        // 这里很容易错，记住 i = idx * 4
+        for (int i = idx * 4; i < n; i += nThread * 4) {
+            for (int step = 0; step < 4; ++step) {
+                buf[step] = i + step < n ? x[i + step] : 0.f;
+                input[step] += alpha * pow(buf[step] - bias, p);
             }
         }
-        for (uint step = 1; step < IPT; ++step)
-            input[0] += input[step];
 
-        if (threadIdx.x == 0)
-            smem[threadIdx.x] = input[0];
+        for (int step = 1; step < 4; ++step)
+            input[0] += input[step];
+        smem[threadIdx.x] = input[0];
         __syncthreads();
 
-        for (uint stride = nThread >> 1; stride > 0; stride >>= 1) {
+        for (int stride = blockDim.x / 2; stride >= 1; stride /= 2) {
             if (threadIdx.x < stride)
                 smem[threadIdx.x] += smem[threadIdx.x + stride];
             __syncthreads();
@@ -85,24 +82,27 @@ namespace cuDL {
             x[blockIdx.x] = smem[0];
     }
 
-    void vectorSum(float* x, float* res, int n, float alpha=1.f, float bias=0.f, float p=1.f, cudaStream_t stream=0) {
+    void vectorSum(float* x, float* res, int n, float alpha=1.f, float bias=0.f, float p=1.f, cudaStream_t stream=nullptr) {
         float* copy = nullptr;
-        cudaMallocAsync(&copy, sizeof(float) * n, stream);
-        cudaMemcpyAsync(copy, x, sizeof(float) * n, cudaMemcpyDeviceToDevice, stream);
+        CUDACHECK(cudaMallocAsync(&copy, sizeof(float) * n, stream));
+        CUDACHECK(cudaMemcpyAsync(copy, x, sizeof(float) * n, cudaMemcpyDeviceToDevice, stream));
 
         int blockSize = BLOCKSIZE;
         int gridSize;
-        int curSize = n;
-        do {
-            gridSize = curSize / blockSize + 1;
-            vectorSumKernel<<<gridSize, blockSize, blockSize, stream>>>(copy, curSize, alpha, bias, p);
-            curSize = gridSize;
-        } while (curSize > 1);
-
-        cudaMemcpyAsync(&res, copy, sizeof(float), cudaMemcpyDeviceToHost, stream);
-        cudaFree(copy);
-        cudaStreamSynchronize(stream);
+        while (n > 1) {
+            gridSize = n / (blockSize * IPT);
+            if (gridSize < 1) {
+                blockSize = n / IPT;
+                gridSize = 1;
+            }
+            vectorSumKernel<<<gridSize, blockSize, blockSize, stream>>>(copy, n, alpha, bias, p);
+            n = gridSize;
+        }
+        cudaMemcpyAsync(res, copy, sizeof(float), cudaMemcpyDeviceToDevice, stream);
+        CUDACHECK(cudaStreamSynchronize(stream));
     }
+
+
 
     __global__ void reduceSumExpKernel(float* x, int n) {
         uint nThread = blockIdx.x * blockDim.x;
@@ -192,7 +192,7 @@ namespace cuDL {
     }
 
     // x = alpha * x + beta
-    __global__ void vectorValueAddKernel(float alpha, float* x, float beta, int n) {
+    __global__ void vectorValueAddKernel(float alpha, float* x, float value, int n) {
         uint idx = blockIdx.x * blockDim.x + threadIdx.x;
         float input[IPT << 1] = {0.f};
         uint offset = idx * (IPT << 1);
@@ -200,40 +200,77 @@ namespace cuDL {
         for (uint step = 0; step < IPT << 1; ++step) {
             if (offset + step < n) {
                 input[step] = x[offset + step];
-                input[step] = alpha * input[step] + beta;
+                input[step] = alpha * input[step] + value;
                 x[offset + step] = input[step];
             }
         }
     }
 
-    void vectorValueAdd(float alpha, float* x, float beta, int n, cudaStream_t stream=nullptr) {
+    void vectorValueAdd(float alpha, int n, float* x, float value, cudaStream_t stream=nullptr) {
         int blockSize = BLOCKSIZE;
         int gridSize = n / (blockSize * (IPT << 1)) + 1;
-        vectorValueAddKernel<<<gridSize, blockSize, 0, stream>>>(alpha, x, beta, n);
+        vectorValueAddKernel<<<gridSize, blockSize, 0, stream>>>(alpha, x, value, n);
     }
 
     __global__ void hadamardPorductKernel(float alpha, int n, const float* A, const float* B, float *C) {
         uint idx = blockIdx.x * blockDim.x + threadIdx.x;
-        uint offset = idx << IPT_SHIFE;
-        offset <<= 1;
+        uint offset = idx * IPT;
         if (offset < n) {
-            float a[IPT * 2] = {0.f};
-            float b[IPT * 2] = {0.f};
+            float a[IPT] = {0.f};
+            float b[IPT] = {0.f};
 
-            for (int i = 0; i < IPT && i + offset < n; ++i) {
+            for (int i = 0; i < IPT && offset + i < n; ++i) {
                 a[i] = A[offset + i];
                 b[i] = B[offset + i];
                 a[i] *= b[i];
                 a[i] *= alpha;
-                C[i] = a[i];
+                C[offset + i] = a[i];
             }
         }
     }
 
     void hadamardPorduct(float alpha, int n, const float* A, const float* B, float* C, cudaStream_t stream=nullptr) {
-        int blockSize = BLOCKSIZE;
-        int gridSize = n / (blockSize * (IPT << 1)) + 1;
+        int blockSize = std::min(BLOCKSIZE, (n >> IPT_SHIFE) + 1);
+        int gridSize = n / (blockSize << IPT_SHIFE) + 1;
         hadamardPorductKernel<<<gridSize, blockSize, 0, stream>>>(alpha, n, A, B, C);
+    }
+
+    __global__ void expKernel(const float* x, float* y, int n) {
+        uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+        uint offset = idx * IPT;
+        if (offset < n) {
+            float a[IPT] = {0.f};
+            for (int i = 0; i < IPT && offset + i < n; ++i) {
+                a[i] = x[offset + i];
+                a[i] = std::exp(a[i]);
+                y[offset + i] = a[i];
+            }
+        }
+    }
+
+    void exp(float* x, float* y, int n, cudaStream_t stream=nullptr) {
+        int blockSize = std::min(BLOCKSIZE, (n >> IPT_SHIFE) + 1);
+        int gridSize = n / (blockSize << IPT_SHIFE) + 1;
+        expKernel<<<gridSize, blockSize, 0, stream>>>(x, y, n);
+    }
+
+    __global__ void reciprocalKernel(const float* x, float* y, int n) {
+        uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+        uint offset = idx * IPT;
+        if (offset < n) {
+            float a[IPT] = {0.f};
+            for (int i = 0; i < IPT && offset + i < n; ++i) {
+                a[i] = x[offset + i];
+                a[i] = 1 / a[i];
+                y[offset + i] = a[i];
+            }
+        }
+    }
+
+    void reciprocal(float* x, float* y, int n, cudaStream_t stream=nullptr) {
+        int blockSize = std::min(BLOCKSIZE, (n >> IPT_SHIFE) + 1);
+        int gridSize = n / (blockSize << IPT_SHIFE) + 1;
+        expKernel<<<gridSize, blockSize, 0, stream>>>(x, y, n);
     }
 }
 

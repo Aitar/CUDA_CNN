@@ -77,16 +77,18 @@ bool cudnnCheck(cudnnStatus_t code, const char *op, const char *file, int line) 
     return false;
 }
 
-template <typename T>
-std::shared_ptr<T> ckNullptr(std::shared_ptr<T> ptr) {
-    if (ptr == nullptr) {
-        std::cout << "[Error] Nullptr got." << std::endl;
-        exit(1);
-    }
-    return ptr;
-}
+
 
 namespace cuDL {
+    template <typename T>
+    std::shared_ptr<T> ckNullptr(std::shared_ptr<T> ptr) {
+        if (ptr == nullptr) {
+            std::cout << "[Error] Nullptr got." << std::endl;
+            exit(1);
+        }
+        return ptr;
+    }
+
     class CudaContext {
     public:
         cublasHandle_t cublas_{};

@@ -29,7 +29,8 @@ namespace cuDL {
         tensorSp inputs_ = nullptr;
         tensorSp inputGrads_ = nullptr;
         tensorSp outputsGrads_ = nullptr;
-        std::shared_ptr <CudaContext> cudaCtx_ = nullptr;
+        nodeSp outputNode_ = nullptr;
+        std::shared_ptr <CudaContext> cuda_ = nullptr;
         std::map <std::shared_ptr<Tensor>, std::shared_ptr<Tensor>> parmas_;
         cudaStream_t stream_{};
 
@@ -69,10 +70,14 @@ namespace cuDL {
         std::string getName() { return name_; };
 
         void setCudaContext(std::shared_ptr <CudaContext> cudaCtx) {
-            cudaCtx_ = std::move(cudaCtx);
+            cuda_ = std::move(cudaCtx);
         }
 
         virtual void print() {}
+
+        nodeSp getOutputNode() {
+            return ckNullptr(outputNode_);
+        }
     };
 
     class Linear : public Layer {
@@ -81,11 +86,21 @@ namespace cuDL {
         tensorSp bias_ = nullptr;
         tensorSp wGrad_ = nullptr;
         tensorSp bGrad_ = nullptr;
-        idenSp weightNode = nullptr;
-        idenSp biasNode = nullptr;
+        idenSp weightNode_ = nullptr;
+        idenSp biasNode_ = nullptr;
+        nodeSp gemmNode_ = nullptr;
 
         int inSize_ = 0;
         int outSize_ = 0;
+
+        Linear(int inSize, int outSize) {
+            name_ = "Linear_" + std::to_string(globalID++);
+            inSize_ = inSize;
+            outSize_ = outSize;
+            hasParams_ = true;
+        }
+
+        ~Linear() = default;
 
         void init(tensorSp inputs) override {
             if (isInit) return;
@@ -106,20 +121,8 @@ namespace cuDL {
             parmas_[weight_] = wGrad_;
             parmas_[bias_] = bGrad_;
 
-            weightNode = make_shared<Identity>(weight_, wGrad_);
-            biasNode = make_shared<Identity>(bias_, bGrad_);
-
 //            printf("success!\n");
         }
-
-        Linear(int inSize, int outSize) {
-            name_ = "Linear_" + std::to_string(globalID++);
-            inSize_ = inSize;
-            outSize_ = outSize;
-            hasParams_ = true;
-        }
-
-        ~Linear() = default;
 
         tensorSp forward(tensorSp inputs) override {
             if (inputs->len() != inSize_)
@@ -132,17 +135,25 @@ namespace cuDL {
 
                 // YT = WT * XT + BT
                 // WT: O * I, XT: I * N, YT = O * N
-            CUBLASCHECK(cublasSgemm_v2(cudaCtx_->cublas_,
+            CUBLASCHECK(cublasSgemm_v2(cuda_->cublas_,
                                        CUBLAS_OP_N, CUBLAS_OP_N,
                                        outSize_, batchSize_, inSize_,
-                                       &cudaCtx_->one,
+                                       &cuda_->one,
                                        weight_->gpu(), outSize_,
                                        inputs_->gpu(), inSize_,
-                                       &cudaCtx_->one,
+                                       &cuda_->one,
                                        outputs_->gpu(), outSize_));
 
 //            printf("success!\n");
             return outputs_;
+        }
+
+        void forward(std::shared_ptr<Layer> preLayer) {
+            init(preLayer->getOutputNode()->getValue());
+            weightNode_ = make_shared<Identity>(weight_, wGrad_, cuda_);
+            biasNode_ = make_shared<Identity>(bias_, bGrad_, cuda_);
+            gemmNode_ = make_shared<Gemm>(nodes{preLayer->getOutputNode()}, cuda_);
+            outputNode_ = make_shared<Add>(nodes{gemmNode_, biasNode_}, 1, 1, cuda_);
         }
 
         tensorSp backward(tensorSp grads) override {
@@ -153,29 +164,27 @@ namespace cuDL {
             bGrad_ = outputsGrads_;
 
             // dw = x * (dy)^T
-            CUBLASCHECK(cublasSger_v2(cudaCtx_->cublas_,
+            CUBLASCHECK(cublasSger_v2(cuda_->cublas_,
                                       outSize_, inSize_,
-                                      &cudaCtx_->one,
+                                      &cuda_->one,
                                       outputsGrads_->gpu(), 1,      // dy: 1, 1, 1, outSize_
                                       inputs_->gpu(), 1,            // x:  1, 1, 1, inSize_
                                       wGrad_->gpu(), outSize_));     // dw: 1, 1, outSize_, inSize_
 
             // dx = w * (dy)^T
             // y = alpha * A @ x + beta * y
-            CUBLASCHECK(cublasSgemv(cudaCtx_->cublas_,
+            CUBLASCHECK(cublasSgemv(cuda_->cublas_,
                                     CUBLAS_OP_T,
                                     outSize_, inSize_,
-                                    &cudaCtx_->one,
+                                    &cuda_->one,
                                     weight_->gpu(), outSize_,
                                     outputsGrads_->gpu(), 1,    // dy: (1, 1, 1, outSize_)
-                                    &cudaCtx_->zero,
+                                    &cuda_->zero,
                                     inputGrads_->gpu(), 1));    // dx: (1, 1, 1, inSize_)
             cudaDeviceSynchronize();
 //            printf("success!\n");
             return inputGrads_;
         }
-
-
 
         void print() override {
             cudaDeviceSynchronize();
@@ -280,8 +289,8 @@ namespace cuDL {
             std::vector <cudnnConvolutionBwdDataAlgoPerf_t> bwdDataPerfs(CUDNN_CONVOLUTION_BWD_DATA_ALGO_COUNT);
 
             // forward 找到最合适的卷积算法，并设置workspace
-            CUDNNCHECK(cudnnGetConvolutionForwardAlgorithmMaxCount(cudaCtx_->cudnn_, &maxAlgoCnt));
-            CUDNNCHECK(cudnnGetConvolutionForwardAlgorithm_v7(cudaCtx_->cudnn_,
+            CUDNNCHECK(cudnnGetConvolutionForwardAlgorithmMaxCount(cuda_->cudnn_, &maxAlgoCnt));
+            CUDNNCHECK(cudnnGetConvolutionForwardAlgorithm_v7(cuda_->cudnn_,
                                                               inputs_->desc_,
                                                               filterDesc_,
                                                               convDesc_,
@@ -290,7 +299,7 @@ namespace cuDL {
                                                               &algoCnt,
                                                               &fwdPerfs[0]));
             fwdAlgo_ = fwdPerfs[0].algo;
-            CUDNNCHECK(cudnnGetConvolutionForwardWorkspaceSize(cudaCtx_->cudnn_,
+            CUDNNCHECK(cudnnGetConvolutionForwardWorkspaceSize(cuda_->cudnn_,
                                                                inputs_->desc_,
                                                                filterDesc_,
                                                                convDesc_,
@@ -299,8 +308,8 @@ namespace cuDL {
             workspaceSize_ = std::max(workspaceSize_, tempSize);
 
             // bias 找到最合适的反向传播计算算法，
-            CUDNNCHECK(cudnnGetConvolutionBackwardFilterAlgorithmMaxCount(cudaCtx_->cudnn_, &maxAlgoCnt));
-            CUDNNCHECK(cudnnGetConvolutionBackwardFilterAlgorithm_v7(cudaCtx_->cudnn_,
+            CUDNNCHECK(cudnnGetConvolutionBackwardFilterAlgorithmMaxCount(cuda_->cudnn_, &maxAlgoCnt));
+            CUDNNCHECK(cudnnGetConvolutionBackwardFilterAlgorithm_v7(cuda_->cudnn_,
                                                                      inputs_->desc_,
                                                                      outputs_->desc_,
                                                                      convDesc_,
@@ -309,7 +318,7 @@ namespace cuDL {
                                                                      &algoCnt,
                                                                      &bwdFilterPerfs[0]));
             bwdFilterAlgo_ = bwdFilterPerfs[0].algo;
-            CUDNNCHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(cudaCtx_->cudnn_,
+            CUDNNCHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(cuda_->cudnn_,
                                                                       inputs_->desc_,
                                                                       outputs_->desc_,
                                                                       convDesc_,
@@ -318,8 +327,8 @@ namespace cuDL {
             workspaceSize_ = std::max(workspaceSize_, tempSize);
 
             // data - bwd
-            CUDNNCHECK(cudnnGetConvolutionBackwardDataAlgorithmMaxCount(cudaCtx_->cudnn_, &maxAlgoCnt));
-            CUDNNCHECK(cudnnGetConvolutionBackwardDataAlgorithm_v7(cudaCtx_->cudnn_,
+            CUDNNCHECK(cudnnGetConvolutionBackwardDataAlgorithmMaxCount(cuda_->cudnn_, &maxAlgoCnt));
+            CUDNNCHECK(cudnnGetConvolutionBackwardDataAlgorithm_v7(cuda_->cudnn_,
                                                                    filterDesc_,
                                                                    outputs_->desc_,
                                                                    convDesc_,
@@ -328,7 +337,7 @@ namespace cuDL {
                                                                    &algoCnt,
                                                                    &bwdDataPerfs[0]));
             bwdDataAlgo_ = bwdDataPerfs[0].algo;
-            CUDNNCHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(cudaCtx_->cudnn_,
+            CUDNNCHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(cuda_->cudnn_,
                                                                     filterDesc_,
                                                                     outputs_->desc_,
                                                                     convDesc_,
@@ -396,16 +405,16 @@ namespace cuDL {
         tensorSp forward(tensorSp inputs) override {
             init(inputs);
 //            printf("\nConv forward...");
-            CUDNNCHECK(cudnnConvolutionForward(cudaCtx_->cudnn_,
-                                               &cudaCtx_->one, inputs_->desc_, inputs_->gpu(),
+            CUDNNCHECK(cudnnConvolutionForward(cuda_->cudnn_,
+                                               &cuda_->one, inputs_->desc_, inputs_->gpu(),
                                                filterDesc_, kernel_->gpu(),
                                                convDesc_, fwdAlgo_,
                                                workspace_, workspaceSize_,
-                                               &cudaCtx_->zero, outputs_->desc_, outputs_->gpu()));
+                                               &cuda_->zero, outputs_->desc_, outputs_->gpu()));
 
-            CUDNNCHECK(cudnnAddTensor(cudaCtx_->cudnn_,
-                                      &cudaCtx_->one, bias_->desc_, bias_->gpu(),
-                                      &cudaCtx_->one, outputs_->desc_, outputs_->gpu()));
+            CUDNNCHECK(cudnnAddTensor(cuda_->cudnn_,
+                                      &cuda_->one, bias_->desc_, bias_->gpu(),
+                                      &cuda_->one, outputs_->desc_, outputs_->gpu()));
 //            printf("success\n");
             return outputs_;
         }
@@ -413,23 +422,23 @@ namespace cuDL {
         tensorSp backward(tensorSp grads) override {
             outputsGrads_ = std::move(grads);
 
-            CUDNNCHECK(cudnnConvolutionBackwardBias(cudaCtx_->cudnn_,
-                                                    &cudaCtx_->one, outputsGrads_->desc_, outputsGrads_->gpu(),
-                                                    &cudaCtx_->zero, biasGrads_->desc_, biasGrads_->gpu()));
+            CUDNNCHECK(cudnnConvolutionBackwardBias(cuda_->cudnn_,
+                                                    &cuda_->one, outputsGrads_->desc_, outputsGrads_->gpu(),
+                                                    &cuda_->zero, biasGrads_->desc_, biasGrads_->gpu()));
 
-            CUDNNCHECK(cudnnConvolutionBackwardFilter(cudaCtx_->cudnn_,
-                                                      &cudaCtx_->one, inputs_->desc_, inputs_->gpu(),
+            CUDNNCHECK(cudnnConvolutionBackwardFilter(cuda_->cudnn_,
+                                                      &cuda_->one, inputs_->desc_, inputs_->gpu(),
                                                       outputsGrads_->desc_, outputsGrads_->gpu(),
                                                       convDesc_, bwdFilterAlgo_,
                                                       workspace_, workspaceSize_,
-                                                      &cudaCtx_->zero, filterDesc_, kernelGrads_->gpu()));
+                                                      &cuda_->zero, filterDesc_, kernelGrads_->gpu()));
 
-            CUDNNCHECK(cudnnConvolutionBackwardData(cudaCtx_->cudnn_,
-                                                    &cudaCtx_->one, filterDesc_, kernel_->gpu(),
+            CUDNNCHECK(cudnnConvolutionBackwardData(cuda_->cudnn_,
+                                                    &cuda_->one, filterDesc_, kernel_->gpu(),
                                                     outputsGrads_->desc_, outputsGrads_->gpu(),
                                                     convDesc_, bwdDataAlgo_,
                                                     workspace_, workspaceSize_,
-                                                    &cudaCtx_->zero, inputGrads_->desc_, inputGrads_->gpu()));
+                                                    &cuda_->zero, inputGrads_->desc_, inputGrads_->gpu()));
             return inputGrads_;
         }
     };
@@ -479,21 +488,21 @@ namespace cuDL {
         tensorSp forward(tensorSp inputs) override {
             init(inputs);
 //            printf("\nPooling forward...");
-            CUDNNCHECK(cudnnPoolingForward(cudaCtx_->cudnn_, poolingDesc_,
-                                           &cudaCtx_->one, inputs_->desc_, inputs_->gpu(),
-                                           &cudaCtx_->zero, outputs_->desc_, outputs_->gpu()));
+            CUDNNCHECK(cudnnPoolingForward(cuda_->cudnn_, poolingDesc_,
+                                           &cuda_->one, inputs_->desc_, inputs_->gpu(),
+                                           &cuda_->zero, outputs_->desc_, outputs_->gpu()));
 //            printf("Success\n");
             return outputs_;
         }
 
         tensorSp backward(tensorSp grads) override {
             outputsGrads_ = std::move(grads);
-            CUDNNCHECK(cudnnPoolingBackward(cudaCtx_->cudnn_, poolingDesc_,
-                                            &cudaCtx_->one,
+            CUDNNCHECK(cudnnPoolingBackward(cuda_->cudnn_, poolingDesc_,
+                                            &cuda_->one,
                                             outputs_->desc_, outputs_->gpu(),
                                             outputsGrads_->desc_, outputsGrads_->gpu(),
                                             inputs_->desc_, inputs_->gpu(),
-                                            &cudaCtx_->zero,
+                                            &cuda_->zero,
                                             inputGrads_->desc_, inputGrads_->gpu()));
 
             return inputGrads_;
@@ -545,10 +554,10 @@ namespace cuDL {
         tensorSp forward(tensorSp inputs) override {
             init(inputs);
 //            std::cout << "[Info] Softmax forward...";
-            CUDNNCHECK(cudnnSoftmaxForward(cudaCtx_->cudnn_,
+            CUDNNCHECK(cudnnSoftmaxForward(cuda_->cudnn_,
                                            CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_INSTANCE,
-                                           &cudaCtx_->one, inputs_->desc_, inputs_->gpu(),
-                                           &cudaCtx_->zero, outputs_->desc_, outputs_->gpu()));
+                                           &cuda_->one, inputs_->desc_, inputs_->gpu(),
+                                           &cuda_->zero, outputs_->desc_, outputs_->gpu()));
             printf("-------------\n");
             inputs_->print();
             outputs_->print();
@@ -627,23 +636,23 @@ namespace cuDL {
         tensorSp forward(tensorSp inputs) override {
             init(inputs);
 
-            cudnnActivationForward(cudaCtx_->cudnn_,
+            cudnnActivationForward(cuda_->cudnn_,
                                    actDesc_,
-                                   &cudaCtx_->one, inputs_->desc_, inputs_->gpu(),
-                                   &cudaCtx_->one, outputs_->desc_, outputs_->gpu());
+                                   &cuda_->one, inputs_->desc_, inputs_->gpu(),
+                                   &cuda_->one, outputs_->desc_, outputs_->gpu());
 
             return outputs_;
         }
 
         tensorSp backward(tensorSp grads) override {
             outputsGrads_ = std::move(grads);
-            cudnnActivationBackward(cudaCtx_->cudnn_,
+            cudnnActivationBackward(cuda_->cudnn_,
                                     actDesc_,
-                                    &cudaCtx_->one,
+                                    &cuda_->one,
                                     outputs_->desc_, outputs_->gpu(),
                                     outputsGrads_->desc_, outputsGrads_->gpu(),
                                     inputs_->desc_, inputs_->gpu(),
-                                    &cudaCtx_->one,
+                                    &cuda_->one,
                                     inputGrads_->desc_, inputGrads_->gpu());
             return inputGrads_;
         }
@@ -660,62 +669,62 @@ namespace cuDL {
         }
     };
 
-    class BatchNorm: public Layer {
-    public:
-        std::shared_ptr<Tensor> gamma_ = nullptr;
-        std::shared_ptr<Tensor> beta_ = nullptr;
-        int channels_ = 0;
-
-        BatchNorm(int channels): channels_(channels) {
-            gamma_ = std::make_shared<Tensor>(1, 1, 1, channels);
-            beta_ = std::make_shared<Tensor>(1, 1, 1, channels);
-            gamma_->valueInit(1.f);
-            beta_->valueInit(0.f);
-        }
-
-        void init(std::shared_ptr<Tensor> inputs) override {
-            if (isInit) return;
-            Layer::init(inputs);
-            outputs_ = std::make_shared<Tensor>(inputs_);
-        }
-
-        std::shared_ptr<Tensor> forward(std::shared_ptr<Tensor> inputs) override {
-            init(inputs);
-            int size = outputs_->h() * outputs_->w();
-            float alpha = 1 / (float) size, cmean, cvar, sttd;
-            for (int c = 0; c < outputs_->c(); ++c) {
-                cmean = 0.f;
-                cvar = 0.f;
-                for (int n = 0; n < outputs_->n(); ++n)
-                    cmean += vectorSum(outputs_->gpu() + n * outputs_->len() + c * size,
-                                    size,
-                                    alpha);
-                cmean /= (float) outputs_->n();
-                for (int n = 0; n < outputs_->n(); ++n)
-                    cvar += vectorSum(outputs_->gpu() + n * outputs_->len() + c * size,
-                                            size,
-                                            alpha,
-                                            cmean,
-                                            2.f);
-                cvar /= (float) outputs_->n();
-                sttd = pow(cvar, -0.5);
-                for (int n = 0; n < outputs_->n(); ++n) {
-                    vectorValueAdd(sttd,
-                                   outputs_->gpu() + n * outputs_->len() + c * size,
-                                   sttd * cmean,
-                                   size);
-                }
-            }
-
-            return outputs_;
-        }
-
-        std::shared_ptr<Tensor> backward(std::shared_ptr<Tensor> grads) override {
-            return nullptr;
-        }
-
-        ~BatchNorm() = default;
-    };
+//    class BatchNorm: public Layer {
+//    public:
+//        std::shared_ptr<Tensor> gamma_ = nullptr;
+//        std::shared_ptr<Tensor> beta_ = nullptr;
+//        int channels_ = 0;
+//
+//        BatchNorm(int channels): channels_(channels) {
+//            gamma_ = std::make_shared<Tensor>(1, 1, 1, channels);
+//            beta_ = std::make_shared<Tensor>(1, 1, 1, channels);
+//            gamma_->valueInit(1.f);
+//            beta_->valueInit(0.f);
+//        }
+//
+//        void init(std::shared_ptr<Tensor> inputs) override {
+//            if (isInit) return;
+//            Layer::init(inputs);
+//            outputs_ = std::make_shared<Tensor>(inputs_);
+//        }
+//
+//        std::shared_ptr<Tensor> forward(std::shared_ptr<Tensor> inputs) override {
+//            init(inputs);
+//            int size = outputs_->h() * outputs_->w();
+//            float alpha = 1 / (float) size, cmean, cvar, sttd;
+//            for (int c = 0; c < outputs_->c(); ++c) {
+//                cmean = 0.f;
+//                cvar = 0.f;
+//                for (int n = 0; n < outputs_->n(); ++n)
+//                    cmean += vectorSum(outputs_->gpu() + n * outputs_->len() + c * size,
+//                                    size,
+//                                    alpha);
+//                cmean /= (float) outputs_->n();
+//                for (int n = 0; n < outputs_->n(); ++n)
+//                    cvar += vectorSum(outputs_->gpu() + n * outputs_->len() + c * size,
+//                                            size,
+//                                            alpha,
+//                                            cmean,
+//                                            2.f);
+//                cvar /= (float) outputs_->n();
+//                sttd = pow(cvar, -0.5);
+//                for (int n = 0; n < outputs_->n(); ++n) {
+//                    vectorValueAdd(sttd,
+//                                   outputs_->gpu() + n * outputs_->len() + c * size,
+//                                   sttd * cmean,
+//                                   size);
+//                }
+//            }
+//
+//            return outputs_;
+//        }
+//
+//        std::shared_ptr<Tensor> backward(std::shared_ptr<Tensor> grads) override {
+//            return nullptr;
+//        }
+//
+//        ~BatchNorm() = default;
+//    };
 };
 
 #endif //MYNN_LAYER_H

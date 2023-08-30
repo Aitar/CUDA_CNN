@@ -254,23 +254,24 @@ namespace cuDL {
         expKernel<<<gridSize, blockSize, 0, stream>>>(x, y, n);
     }
 
-    __global__ void reciprocalKernel(const float* x, float* y, int n) {
+    __global__ void powKernel(const float* x, float* y, float p, int n) {
         uint idx = blockIdx.x * blockDim.x + threadIdx.x;
         uint offset = idx * IPT;
         if (offset < n) {
             float a[IPT] = {0.f};
             for (int i = 0; i < IPT && offset + i < n; ++i) {
                 a[i] = x[offset + i];
-                a[i] = 1 / a[i];
+                if (p < 0) a[i] += 1e-9;
+                a[i] = pow(a[i], p);
                 y[offset + i] = a[i];
             }
         }
     }
 
-    void reciprocal(float* x, float* y, int n, cudaStream_t stream=nullptr) {
+    void pow(float* x, float* y, float p, int n, cudaStream_t stream=nullptr) {
         int blockSize = std::min(BLOCKSIZE, (n >> IPT_SHIFE) + 1);
         int gridSize = n / (blockSize << IPT_SHIFE) + 1;
-        expKernel<<<gridSize, blockSize, 0, stream>>>(x, y, n);
+        powKernel<<<gridSize, blockSize, 0, stream>>>(x, y, p, n);
     }
 }
 

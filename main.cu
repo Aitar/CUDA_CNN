@@ -8,6 +8,31 @@ using namespace std;
 using namespace cuDL;
 
 int main() {
+    auto cuda = make_shared<CudaContext>();
+    float aa[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+    auto tensorA = make_shared<Tensor>(3, 1, 1, 3, aa);
+    float bb[] = {1, 1, 1, 1, 1, 1, 1, 1, 1};
+    auto tensorB = make_shared<Tensor>(3, 1, 1, 3, bb);
+    auto tensorC = make_shared<Tensor>(1, 1, 1, 1);
+    tensorC->valueInit(2);
+
+    auto idenA = make_shared<Identity>(tensorA, cuda);
+    auto idenB = make_shared<Identity>(tensorB, cuda);
+    auto idenGrad = make_shared<Identity>(tensorC, cuda);
+
+    auto add = make_shared<Add>(nodes{idenA, idenB}, 1, 1, cuda);
+    auto mul = make_shared<Mul>(nodes{add, idenA}, cuda);
+    auto gemm = make_shared<Gemm>(nodes{mul, idenB}, cuda);
+    auto sum = make_shared<Sum>(nodes{gemm}, cuda);
+
+    Executor executor(sum, cuda);
+    auto res = executor.forward();
+    res->print();
+    auto grad = make_shared<Tensor>(1, 1, 1, 1);
+    grad->valueInit(2);
+    executor.backward(grad);
+    executor.print();
+
 //    const string trainDataPath = "/nfs/volume-73-1/huangdingli/my_workspace/cuda/myNN/data/train-images-idx3-ubyte";
 //    const string trainLabelPath = "/nfs/volume-73-1/huangdingli/my_workspace/cuda/myNN/data/train-labels-idx1-ubyte";
 //    const string testDataPath = "/nfs/volume-73-1/huangdingli/my_workspace/cuda/myNN/data/t10k-images-idx3-ubyte";

@@ -33,6 +33,7 @@ namespace cuDL {
         std::shared_ptr <CudaContext> cuda_ = nullptr;
         std::map <std::shared_ptr<Tensor>, std::shared_ptr<Tensor>> parmas_;
         cudaStream_t stream_{};
+        nodeSp inputNode_ = nullptr;
 
         int batchSize_ = 0;
         bool isInit = false;
@@ -46,7 +47,7 @@ namespace cuDL {
 
         virtual tensorSp backward(tensorSp grads) = 0;
 
-//        virtual nodes forward(nodes inputs) = 0;
+        virtual void makeGraph(std::shared_ptr<Layer> preLayer);
 
         virtual void init(tensorSp inputs) {
             isInit = true;
@@ -148,12 +149,12 @@ namespace cuDL {
             return outputs_;
         }
 
-        void forward(std::shared_ptr<Layer> preLayer) {
+        void makeGraph(std::shared_ptr<Layer> preLayer) {
             init(preLayer->getOutputNode()->getValue());
             weightNode_ = make_shared<Identity>(weight_, wGrad_, cuda_);
             biasNode_ = make_shared<Identity>(bias_, bGrad_, cuda_);
             gemmNode_ = make_shared<Gemm>(nodes{preLayer->getOutputNode()}, cuda_);
-            outputNode_ = make_shared<Add>(nodes{gemmNode_, biasNode_}, 1, 1, cuda_);
+            outputNode_ = make_shared<Add>(nodes{gemmNode_, biasNode_}, cuda_, 1, 1);
         }
 
         tensorSp backward(tensorSp grads) override {
@@ -220,6 +221,10 @@ namespace cuDL {
         tensorSp bias_ = nullptr;
         tensorSp kernelGrads_ = nullptr;
         tensorSp biasGrads_ = nullptr;
+        nodeSp kernelNode_ = nullptr;
+        nodeSp biasNode_ = nullptr;
+        nodeSp convNode_ = nullptr;
+        nodeSp addNode_ = nullptr;
 
         cudnnFilterDescriptor_t filterDesc_{};
         cudnnConvolutionDescriptor_t convDesc_{};
@@ -228,7 +233,7 @@ namespace cuDL {
         cudnnConvolutionBwdDataAlgo_t bwdDataAlgo_;
         cudnnConvolutionBwdFilterAlgo_t bwdFilterAlgo_;
 
-        void **workspace_{};
+        void** workspace_;
         size_t workspaceSize_ = 0;
 
     public:
@@ -239,10 +244,10 @@ namespace cuDL {
         int stride_;
         int padding_;
         int dilation_;
-        int inputH_{};
-        int inputW_{};
-        int outputH_{};
-        int outputW_{};
+        int inputH_;
+        int inputW_;
+        int outputH_;
+        int outputW_;
         float paddingFill_;
 
 
@@ -419,6 +424,26 @@ namespace cuDL {
             return outputs_;
         }
 
+        void makeGraph(std::shared_ptr<Layer> preLayer) {
+            init(preLayer->getOutputNode()->getValue());
+            kernelNode_ = make_shared<Identity>(kernel_, kernelGrads_, cuda_);
+            biasNode_ = make_shared<Identity>(bias_, biasGrads_, cuda_);
+            convNode_ = make_shared<Conv>(
+                    nodes{preLayer->getOutputNode(), kernelNode_},
+                    outputH_,
+                    outputW_,
+                    filterDesc_,
+                    convDesc_,
+                    fwdAlgo_,
+                    bwdDataAlgo_,
+                    bwdFilterAlgo_,
+                    workspace_,
+                    workspaceSize_,
+                    cuda_);
+            outputNode_ = make_shared<Add>(nodes{convNode_, biasNode_}, cuda_, 1, 1);
+        }
+
+
         tensorSp backward(tensorSp grads) override {
             outputsGrads_ = std::move(grads);
 
@@ -443,20 +468,21 @@ namespace cuDL {
         }
     };
 
-    class Pooling : public Layer {
+    class Pooling2D : public Layer {
     private:
         int kernelSize_;
         int padding_;
         int stride_;
-        int inputH_{};
-        int inputW_{};
-        int outputH_{};
-        int outputW_{};
+        int inputH_;
+        int inputW_;
+        int outputH_;
+        int outputW_;
         cudnnPoolingMode_t mode_;
-        cudnnPoolingDescriptor_t poolingDesc_{};
+        cudnnPoolingDescriptor_t poolingDesc_;
+        nodeSp poolingNode_ = nullptr;
 
     public:
-        Pooling(int kernelSize, int padding, int stride, cudnnPoolingMode_t mode) :
+        Pooling2D(int kernelSize, int padding, int stride, cudnnPoolingMode_t mode) :
                 kernelSize_(kernelSize), padding_(padding), stride_(stride), mode_(mode) {
 
             cudnnCreatePoolingDescriptor(&poolingDesc_);
@@ -467,7 +493,7 @@ namespace cuDL {
                                         stride_, stride_);
         }
 
-        ~Pooling() {
+        ~Pooling2D() {
             cudnnDestroyPoolingDescriptor(poolingDesc_);
         }
 
@@ -507,20 +533,31 @@ namespace cuDL {
 
             return inputGrads_;
         }
+
+        void makeGraph(std::shared_ptr<Layer> preLayer) {
+            inputNode_ = preLayer->getOutputNode();
+            init(inputNode_->getValue());
+            outputNode_ = make_shared<Pooling>(nodes{inputNode_},
+                                               inputs_,
+                                               inputGrads_,
+                                               outputs_,
+                                               poolingDesc_,
+                                               cuda_);
+        }
     };
 
-    class MaxPooling : public Pooling {
+    class MaxPooling : public Pooling2D {
     public:
         explicit MaxPooling(int kernelSize, int padding = 0, int stride = 1) :
-                Pooling(kernelSize, padding, stride, CUDNN_POOLING_MAX) {
+                Pooling2D(kernelSize, padding, stride, CUDNN_POOLING_MAX) {
             name_ = "MaxPooling_" + std::to_string(globalID++);
         }
     };
 
-    class AvgPooling : public Pooling {
+    class AvgPooling : public Pooling2D {
     public:
         explicit AvgPooling(int kernelSize = 2, int padding = 0, int stride = 1) :
-                Pooling(kernelSize, padding, stride, CUDNN_POOLING_AVERAGE_COUNT_EXCLUDE_PADDING) {
+                Pooling2D(kernelSize, padding, stride, CUDNN_POOLING_AVERAGE_COUNT_EXCLUDE_PADDING) {
             name_ = "MaxPooling_" + std::to_string(globalID++);
         }
     };
@@ -534,6 +571,11 @@ namespace cuDL {
     public:
         int size_ = 0;
         tensorSp loss_;
+        nodeSp exp_;
+        nodeSp sum_;
+        nodeSp reciprocal_;
+        nodeSp expand_;
+        
 
         Softmax() {
             name_ = "Softmax_" + std::to_string(globalID++);
@@ -558,10 +600,17 @@ namespace cuDL {
                                            CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_INSTANCE,
                                            &cuda_->one, inputs_->desc_, inputs_->gpu(),
                                            &cuda_->zero, outputs_->desc_, outputs_->gpu()));
-            printf("-------------\n");
-            inputs_->print();
-            outputs_->print();
+
             return outputs_;
+        }
+
+        void makeGraph(std::shared_ptr<Layer> preLayer) {
+            init(preLayer->getOutputNode()->getValue());
+            exp_ = make_shared<Exp>(nodes{preLayer->getOutputNode()}, cuda_);
+            sum_ = make_shared<Sum>(nodes{exp_}, cuda_);
+            reciprocal_ = make_shared<Pow>(nodes{sum_}, -1, cuda_);
+            expand_ = make_shared<Expand>(nodes{reciprocal_}, inputs_->size(), cuda_);
+            outputNode_ = make_shared<Mul>(nodes{exp_, expand_}, cuda_);
         }
 
         float getLoss(const tensorSp &labels) {
@@ -609,7 +658,7 @@ namespace cuDL {
 
     class Activation : public Layer {
     private:
-        cudnnActivationDescriptor_t actDesc_{};
+        cudnnActivationDescriptor_t actDesc_;
         cudnnActivationMode_t mode_;
         float coef_;
 
@@ -657,6 +706,19 @@ namespace cuDL {
             return inputGrads_;
         }
 
+        void makeGraph(shared_ptr<Layer> preLayer) override {
+            inputNode_ = preLayer->getOutputNode();
+            init(inputNode_->getValue());
+            outputNode_ = make_shared<Active>(nodes{inputNode_},
+                                              inputs_,
+                                              inputGrads_,
+                                              outputs_,
+                                              outputsGrads_,
+                                              actDesc_,
+                                              coef_,
+                                              cuda_);
+        }
+
         ~Activation() {
             cudnnDestroyActivationDescriptor(actDesc_);
         }
@@ -669,26 +731,31 @@ namespace cuDL {
         }
     };
 
-//    class BatchNorm: public Layer {
-//    public:
-//        std::shared_ptr<Tensor> gamma_ = nullptr;
-//        std::shared_ptr<Tensor> beta_ = nullptr;
-//        int channels_ = 0;
-//
-//        BatchNorm(int channels): channels_(channels) {
-//            gamma_ = std::make_shared<Tensor>(1, 1, 1, channels);
-//            beta_ = std::make_shared<Tensor>(1, 1, 1, channels);
-//            gamma_->valueInit(1.f);
-//            beta_->valueInit(0.f);
-//        }
-//
-//        void init(std::shared_ptr<Tensor> inputs) override {
-//            if (isInit) return;
-//            Layer::init(inputs);
-//            outputs_ = std::make_shared<Tensor>(inputs_);
-//        }
-//
-//        std::shared_ptr<Tensor> forward(std::shared_ptr<Tensor> inputs) override {
+    class BatchNorm: public Layer {
+    private:
+
+        nodeSp alphaNode_ = nullptr;
+        nodeSp betaNode_ = nullptr;
+
+    public:
+        std::shared_ptr<Tensor> alpha_ = nullptr;
+        std::shared_ptr<Tensor> beta_ = nullptr;
+        int channels_ = 0;
+
+        BatchNorm(int channels): channels_(channels) {
+            alpha_ = std::make_shared<Tensor>(1, 1, 1, 1);
+            beta_ = std::make_shared<Tensor>(1, 1, 1, 1);
+            alpha_->valueInit(1.f);
+            beta_->valueInit(0.f);
+        }
+
+        void init(std::shared_ptr<Tensor> inputs) override {
+            if (isInit) return;
+            Layer::init(inputs);
+            outputs_ = std::make_shared<Tensor>(inputs_);
+        }
+
+        std::shared_ptr<Tensor> forward(std::shared_ptr<Tensor> inputs) override {
 //            init(inputs);
 //            int size = outputs_->h() * outputs_->w();
 //            float alpha = 1 / (float) size, cmean, cvar, sttd;
@@ -715,16 +782,34 @@ namespace cuDL {
 //                                   size);
 //                }
 //            }
-//
-//            return outputs_;
-//        }
-//
-//        std::shared_ptr<Tensor> backward(std::shared_ptr<Tensor> grads) override {
-//            return nullptr;
-//        }
-//
-//        ~BatchNorm() = default;
-//    };
+
+            return outputs_;
+        }
+
+        std::shared_ptr<Tensor> backward(std::shared_ptr<Tensor> grads) override {
+            return nullptr;
+        }
+
+        void makeGraph(shared_ptr<Layer> preLayer) override {
+            init(preLayer->getOutputNode()->getValue());
+            inputNode_ = preLayer->getOutputNode();
+            alphaNode_ = make_shared<Identity>(alpha_, cuda_);
+            betaNode_ = make_shared<Identity>(beta_, cuda_);
+
+            auto mean = make_shared<Sum>(nodes{inputNode_}, cuda_, 1 / inputNode_->getValue()->size());
+            auto meanVector = make_shared<Expand>(nodes{mean}, inputNode_->getValue()->size(), cuda_);
+            auto xSubMean = make_shared<Add>(nodes{inputNode_, meanVector}, cuda_, 1, -1);
+            auto var = make_shared<Sum>(nodes{xSubMean}, cuda_, 1 / inputNode_->getValue()->size(), 0.f, 2.f);
+            auto reStd = make_shared<Pow>(nodes{var}, -0.5, cuda_);
+            auto alpha = make_shared<Mul>(nodes{alphaNode_, reStd}, cuda_);
+            auto aVec = make_shared<Expand>(nodes{alpha}, inputNode_->getValue()->size(), cuda_);
+            auto norm = make_shared<Mul>(nodes{aVec, xSubMean}, cuda_);
+            auto bVec = make_shared<Expand>(nodes{betaNode_}, inputNode_->getValue()->size(), cuda_);
+            outputNode_ = make_shared<Add>(nodes{norm, bVec}, cuda_);
+        }
+
+        ~BatchNorm() = default;
+    };
 };
 
 #endif //MYNN_LAYER_H

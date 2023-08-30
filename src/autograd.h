@@ -37,6 +37,10 @@ namespace cuDL{
 
         void setValue(tensorSp value) {
             value_ = std::move(value);
+            if (grad_ == nullptr || grad_->size() != value_->size()) {
+                grad_ = make_shared<Tensor>(value_, 1, false);
+                cout << "[Waring] Value shape has changed, grad re-malloced." << endl;
+            } else grad_->valueInit();
         }
 
         tensorSp getGrad() {
@@ -48,8 +52,8 @@ namespace cuDL{
         }
 
 
-        void setCuda(const shared_ptr<CudaContext>& cuda) {
-            cuda_ = cuda;
+        void setCuda(shared_ptr<CudaContext> cuda) {
+            cuda_ = std::move(cuda);
         }
 
         vector<shared_ptr<OpNode>>& getInputNodes() {
@@ -77,10 +81,9 @@ namespace cuDL{
         float beta_;
 
     public:
-        Add(vector<shared_ptr<OpNode>> inNodes, shared_ptr<CudaContext> cuda, float alpha = 1.f, float beta = 1.f) :
+        Add(vector<shared_ptr<OpNode>> inNodes, float alpha = 1.f, float beta = 1.f) :
                  alpha_(alpha), beta_(beta) {
             setName("Add");
-            cuda_ = std::move(cuda);
             inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
         }
 
@@ -125,9 +128,9 @@ namespace cuDL{
         shared_ptr<Tensor> db_ = nullptr;
 
     public:
-        Gemm(nodes inNodes, shared_ptr<CudaContext> cuda) {
+        Gemm(nodes inNodes) {
             setName("Gemm");
-            cuda_ = std::move(cuda);
+            
             inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
         }
 
@@ -187,9 +190,9 @@ namespace cuDL{
         shared_ptr<Tensor> da_ = nullptr;
         shared_ptr<Tensor> db_ = nullptr;
     public:
-        Mul(nodes inNodes, shared_ptr<CudaContext> cuda) {
+        Mul(nodes inNodes) {
             setName("Mul");
-            cuda_ = std::move(cuda);
+            
             inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
         }
 
@@ -227,15 +230,15 @@ namespace cuDL{
         float p_ = 1.f;
 
     public:
-        Sum(nodes inNodes, shared_ptr<CudaContext> cuda) {
+        Sum(nodes inNodes) {
             setName("Sum");
-            cuda_ = std::move(cuda);
+            
             inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
         }
 
-        Sum(nodes inNodes, shared_ptr<CudaContext> cuda, float alpha, float bias = 0.f, float p = 1.f)
+        Sum(nodes inNodes, float alpha, float bias = 0.f, float p = 1.f)
         : alpha_(alpha), bias_(bias), p_(p) {
-            cuda_ = std::move(cuda);
+            
             inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
         }
 
@@ -268,9 +271,9 @@ namespace cuDL{
         shared_ptr<Tensor> da_ = nullptr;
 
     public:
-        Exp(nodes inNodes, shared_ptr<CudaContext> cuda) {
+        Exp(nodes inNodes) {
                 setName("Exp");
-                cuda_ = std::move(cuda);
+                
                 inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
         }
 
@@ -299,6 +302,44 @@ namespace cuDL{
         }
     };
 
+    class Ln: public OpNode {
+    private:
+        shared_ptr<Tensor> a_ = nullptr;
+        shared_ptr<Tensor> da_ = nullptr;
+
+    public:
+        Ln(nodes inNodes) {
+            setName("Ln");
+            
+            inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
+        }
+
+        void init() {
+            isInit = true;
+            a_ = ckNullptr(inNodes_[0]->getValue());
+            da_ = make_shared<Tensor>(a_, 1, false);
+            grad_ = make_shared<Tensor>(a_, 1, false);
+            value_ = make_shared<Tensor>(a_, 1, false);
+            inputGrads_.push_back(da_);
+        }
+
+        void forward() override {
+            if (!isInit) init();
+            if (a_->size() < 8 && a_->device() == CPU) {
+                for (int i = 0; i < a_->size(); ++i)
+                    value_->cpu()[i] = std::log(a_->cpu()[i]);
+            } else {
+                log(a_->gpu(), value_->gpu(), a_->size());
+            }
+        }
+
+        tensors& backward() override {
+            pow(value_->gpu(), da_->gpu(), -1, value_->size());
+            hadamardPorduct(1, da_->size(), da_->gpu(), grad_->gpu(), da_->gpu());
+            return inputGrads_;
+        }
+    };
+
     class Expand: public OpNode {
     private:
         int dup_;
@@ -306,9 +347,9 @@ namespace cuDL{
         shared_ptr<Tensor> da_ = nullptr;
 
     public:
-        Expand(nodes inNodes, int dup, shared_ptr<CudaContext> cuda): dup_(dup) {
+        Expand(nodes inNodes, int dup): dup_(dup) {
             setName("Expand");
-            cuda_ = std::move(cuda);
+            
             inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
         }
 
@@ -339,10 +380,10 @@ namespace cuDL{
         float p_;
 
     public:
-        Pow(nodes inNodes, float p, shared_ptr<CudaContext> cuda) {
+        Pow(nodes inNodes, float p) {
             setName("Pow");
             p_ = p;
-            cuda_ = std::move(cuda);
+            
             inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
         }
 
@@ -374,15 +415,20 @@ namespace cuDL{
 
     class Identity: public OpNode {
     public:
-        Identity(tensorSp value, shared_ptr<CudaContext> cuda) {
+        Identity() {
             setName("Identity");
-            cuda_ = std::move(cuda);
+        }
+
+        Identity(tensorSp value) {
+            setName("Identity");
+            
             value_ = std::move(value);
             grad_ = make_shared<Tensor>(value_->n(), value_->c(), value_->h(), value_->w());
         }
 
-        Identity(tensorSp value, tensorSp grad, shared_ptr<CudaContext> cuda) {
-            cuda_ = std::move(cuda);
+        Identity(tensorSp value, tensorSp grad) {
+            setName("Identity");
+            
             value_ = std::move(value);
             grad_ = std::move(grad);
         }
@@ -446,7 +492,7 @@ namespace cuDL{
              workspaceSize_(workspaceSize) {
 
             setName("Conv");
-            cuda_ = std::move(cuda);
+            
             inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
         }
 
@@ -511,7 +557,7 @@ namespace cuDL{
             outputW_(outputW),
             poolingDesc_(poolingDesc) {
             setName("Pooling");
-            cuda_ = std::move(cuda);
+            
             inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
         }
 
@@ -526,7 +572,7 @@ namespace cuDL{
                 poolingDesc_(poolingDesc) {
 
             setName("Pooling");
-            cuda_ = std::move(cuda);
+            
             inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
             value_ = std::move(value);
         }
@@ -580,15 +626,15 @@ namespace cuDL{
             grad_ = std::move(grad);
             value_ = std::move(value);
             setName("Active");
-            cuda_ = std::move(cuda);
+            
             inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
         }
 
-        Active(nodes inNodes, cudnnActivationMode_t mode, float coef, shared_ptr<CudaContext> cuda) {
+        Active(nodes inNodes, cudnnActivationDescriptor_t actDesc, float coef) {
             coef_ = coef;
-            mode_ = mode;
+            actDesc_ = actDesc;
             setName("Active");
-            cuda_ = std::move(cuda);
+            
             inNodes_.insert(inNodes_.end(), inNodes.begin(), inNodes.end());
         }
 
@@ -602,17 +648,21 @@ namespace cuDL{
 
         void forward() override {
             if (!isInit) init();
-            if (a_->size() < 8 && a_->device() == CPU) {
-                for (int i = 0; i < a_->size(); ++i)
-                    value_->cpu()[i] = p_ < 0 ? std::pow(a_->cpu()[i] + 1e-9, p_) : std::pow(a_->cpu()[i], p_);
-            } else {
-                pow(a_->gpu(), value_->gpu(), p_, a_->size());
-            }
+            cudnnActivationForward(cuda_->cudnn_,
+                                   actDesc_,
+                                   &cuda_->one, a_->desc_, a_->gpu(),
+                                   &cuda_->one, value_->desc_, value_->gpu());
         }
 
         tensors& backward() override {
-            hadamardPorduct(1, value_->size(), value_->gpu(), value_->gpu(), da_->gpu());
-            hadamardPorduct(-1, grad_->size(), value_->gpu(), grad_->gpu(), da_->gpu());
+            cudnnActivationBackward(cuda_->cudnn_,
+                                    actDesc_,
+                                    &cuda_->one,
+                                    value_->desc_, value_->gpu(),
+                                    grad_->desc_, grad_->gpu(),
+                                    a_->desc_, a_->gpu(),
+                                    &cuda_->one,
+                                    da_->desc_, da_->gpu());
             return inputGrads_;
         }
     };
@@ -630,7 +680,8 @@ namespace cuDL{
             topoSort(root_);
             backwordTopo = forwordTopo;
             std::reverse(backwordTopo.begin(), backwordTopo.end());
-            printf("");
+            for (const shared_ptr<OpNode>& node: forwordTopo)
+                node->setCuda(cuda_);
         }
 
         void topoSort(shared_ptr<OpNode>& root) {

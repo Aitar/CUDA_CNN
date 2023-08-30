@@ -53,17 +53,17 @@ namespace cuDL {
     }
 
     __global__ void vectorSumKernel(float* x, int n, float alpha, float bias, float p) {
-        unsigned int nThread = gridDim.x * blockDim.x;
-        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        uint nThread = gridDim.x * blockDim.x;
+        uint idx = blockIdx.x * blockDim.x + threadIdx.x;
         extern __shared__ float smem[];
         float input[IPT] = {0.f};
         float buf[IPT] = {0.f};
 
         // 这里很容易错，记住 i = idx * 4
-        for (int i = idx * 4; i < n; i += nThread * 4) {
+        for (uint i = idx * 4; i < n; i += nThread * 4) {
             for (int step = 0; step < 4; ++step) {
                 buf[step] = i + step < n ? x[i + step] : 0.f;
-                input[step] += alpha * pow(buf[step] - bias, p);
+                input[step] += pow(buf[step] - bias, p);
             }
         }
 
@@ -72,11 +72,14 @@ namespace cuDL {
         smem[threadIdx.x] = input[0];
         __syncthreads();
 
-        for (int stride = blockDim.x / 2; stride >= 1; stride /= 2) {
+        for (uint stride = blockDim.x / 2; stride >= 1; stride /= 2) {
             if (threadIdx.x < stride)
                 smem[threadIdx.x] += smem[threadIdx.x + stride];
             __syncthreads();
         }
+
+        if (gridDim.x == 1)
+            smem[0] *= alpha;
 
         if (threadIdx.x == 0)
             x[blockIdx.x] = smem[0];
@@ -272,6 +275,40 @@ namespace cuDL {
         int blockSize = std::min(BLOCKSIZE, (n >> IPT_SHIFE) + 1);
         int gridSize = n / (blockSize << IPT_SHIFE) + 1;
         powKernel<<<gridSize, blockSize, 0, stream>>>(x, y, p, n);
+    }
+
+    __global__ void logKernel(const float* x, float* y, int n) {
+        uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+        uint offset = idx * IPT;
+        if (offset < n) {
+            float a[IPT] = {0.f};
+            for (int i = 0; i < IPT && offset + i < n; ++i) {
+                a[i] = x[offset + i];
+                a[i] = std::log(a[i]);
+                y[offset + i] = a[i];
+            }
+        }
+    }
+
+    void log(float* x, float* y, int n, cudaStream_t stream=nullptr) {
+        int blockSize = std::min(BLOCKSIZE, (n >> IPT_SHIFE) + 1);
+        int gridSize = n / (blockSize << IPT_SHIFE) + 1;
+        logKernel<<<gridSize, blockSize, 0, stream>>>(x, y, n);
+    }
+
+    __global__ void setValueKernel(float* x, float value, int n) {
+        uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+        uint offset = idx * IPT;
+        if (offset < n) {
+            for (int i = 0; i < IPT && offset + i < n; ++i)
+                x[offset + i] = value;
+        }
+    }
+
+    void setValue(float* x, float value, int n, cudaStream_t stream=nullptr) {
+        int blockSize = std::min(BLOCKSIZE, (n >> IPT_SHIFE) + 1);
+        int gridSize = n / (blockSize << IPT_SHIFE) + 1;
+        setValueKernel<<<gridSize, blockSize, 0, stream>>>(x, value, n);
     }
 }
 

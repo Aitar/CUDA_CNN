@@ -1,7 +1,3 @@
-//
-// Created by Aitar Hwan on 2023/3/11.
-//
-
 #ifndef MYNN_TENSOR_H
 #define MYNN_TENSOR_H
 
@@ -35,7 +31,7 @@ namespace cuDL {
             cudnnDestroyTensorDescriptor(desc_);
         }
 
-        void tensorInit(int n, int c, int h, int w, float* arr=nullptr) {
+        void tensorInit(int n, int c, int h, int w) {
             n_ = n;
             c_ = c;
             h_ = h;
@@ -51,7 +47,7 @@ namespace cuDL {
         cudnnTensorDescriptor_t desc_{};
 
         Tensor(int n, int c, int h, int w, float* arr=nullptr) {
-            tensorInit(n, c, h, w, arr);
+            tensorInit(n, c, h, w);
             if (arr != nullptr) arrayInit(arr);
             else valueInit();
         }
@@ -69,13 +65,16 @@ namespace cuDL {
         }
 
         void valueInit(float value=0.f) {
-            for (int i = 0; i < size(); ++i)
-                cpu()[i] = value;
+            if (device_ == CPU) {
+                for (int i = 0; i < size(); ++i)
+                    cpu()[i] = value;
+            } else {
+                setValue(gpu(), value, size());
+            }
         }
 
-        void arrayInit(float* arr) {
-            for (int i = 0; i < size(); ++i)
-                cpu()[i] = arr[i];
+        void arrayInit(const float* arr) {
+            memcpy(cpu(), arr, sizeof(float) * size());
         }
 
         void uniformInit() {
@@ -181,13 +180,13 @@ namespace cuDL {
             return device_;
         }
 
-        int size() const {return n_ * c_ * h_ * w_; }
-        int len() const {return c_ * h_ * w_; }
-        size_t memSize() const {return size() * sizeof(float); }
-        int n() const { return n_; }
-        int c() const { return c_; }
-        int h() const { return h_; }
-        int w() const { return w_; }
+        [[nodiscard]] int size() const {return n_ * c_ * h_ * w_; }
+        [[nodiscard]] int len() const {return c_ * h_ * w_; }
+        [[nodiscard]] size_t memSize() const {return size() * sizeof(float); }
+        [[nodiscard]] int n() const { return n_; }
+        [[nodiscard]] int c() const { return c_; }
+        [[nodiscard]] int h() const { return h_; }
+        [[nodiscard]] int w() const { return w_; }
     };
 
     class MerticsLogger {

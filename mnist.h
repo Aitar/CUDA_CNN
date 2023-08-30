@@ -1,7 +1,3 @@
-//
-// Created by didi on 2023/8/20.
-//
-
 #ifndef MYNN_MNIST_H
 #define MYNN_MNIST_H
 
@@ -14,7 +10,7 @@
 
 namespace cuDL{
 
-    class MNIST : public Dataset {
+    class MNIST: public Dataset {
     public:
         std::vector<std::vector< float>> data_;
         std::string labelPath_;
@@ -106,7 +102,7 @@ namespace cuDL{
         }
     };
 
-    class Net : public Module {
+    class Net: public Module {
     public:
         int nClass_;
 
@@ -126,6 +122,16 @@ namespace cuDL{
 
         std::shared_ptr <Tensor> forward(std::shared_ptr <Tensor> input) override {
             return Module::forward(input);
+        }
+
+        nodeSp forward(nodeSp input) {
+            getLayer("conv1")->makeGraph(std::move(input));
+            getLayer("max_pool1")->makeGraph(getLayer("conv1")->getOutputNode());
+            getLayer("conv1")->makeGraph(std::move(input));
+            getLayer("conv1")->makeGraph(std::move(input));
+            getLayer("conv1")->makeGraph(std::move(input));
+            getLayer("conv1")->makeGraph(std::move(input));
+            getLayer("conv1")->makeGraph(std::move(input));
         }
     };
 

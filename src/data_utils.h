@@ -1,6 +1,3 @@
-//
-// Created by Aitar Hwan on 2023/3/16.
-//
 #ifndef MYNN_DATA_UTILS_H
 #define MYNN_DATA_UTILS_H
 # include <cassert>

@@ -1,7 +1,3 @@
-//
-// Created by Aitar Hwan on 2023/3/11.
-//
-
 #ifndef MYNN_LAYER_H
 #define MYNN_LAYER_H
 
@@ -47,7 +43,7 @@ namespace cuDL {
 
         virtual tensorSp backward(tensorSp grads) = 0;
 
-        virtual void makeGraph(std::shared_ptr<Layer> preLayer);
+        virtual void makeGraph(nodeSp preNode) = 0;
 
         virtual void init(tensorSp inputs) {
             isInit = true;
@@ -64,6 +60,17 @@ namespace cuDL {
             }
             for (auto &param: parmas_)
                 vectorAdd(lr, param.second->gpu(), 1.f, param.first->gpu(), param.first->size());
+
+            cudaDeviceSynchronize();
+        }
+
+        virtual void zeroGrad() {
+            if (!hasParams_) {
+                printf("[Warning] Try to zeroGrad at layer without parameters.\n");
+                return;
+            }
+            for (auto &param: parmas_)
+                param.second->valueInit();
 
             cudaDeviceSynchronize();
         }
@@ -149,12 +156,13 @@ namespace cuDL {
             return outputs_;
         }
 
-        void makeGraph(std::shared_ptr<Layer> preLayer) {
-            init(preLayer->getOutputNode()->getValue());
-            weightNode_ = make_shared<Identity>(weight_, wGrad_, cuda_);
-            biasNode_ = make_shared<Identity>(bias_, bGrad_, cuda_);
-            gemmNode_ = make_shared<Gemm>(nodes{preLayer->getOutputNode()}, cuda_);
-            outputNode_ = make_shared<Add>(nodes{gemmNode_, biasNode_}, cuda_, 1, 1);
+        void makeGraph(nodeSp preNode) override {
+            inputNode_ = std::move(preNode);
+            init(inputNode_->getValue());
+            weightNode_ = make_shared<Identity>(weight_, wGrad_);
+            biasNode_ = make_shared<Identity>(bias_, bGrad_);
+            gemmNode_ = make_shared<Gemm>(nodes{inputNode_});
+            outputNode_ = make_shared<Add>(nodes{gemmNode_, biasNode_}, 1, 1);
         }
 
         tensorSp backward(tensorSp grads) override {
@@ -424,12 +432,13 @@ namespace cuDL {
             return outputs_;
         }
 
-        void makeGraph(std::shared_ptr<Layer> preLayer) {
-            init(preLayer->getOutputNode()->getValue());
-            kernelNode_ = make_shared<Identity>(kernel_, kernelGrads_, cuda_);
-            biasNode_ = make_shared<Identity>(bias_, biasGrads_, cuda_);
+        void makeGraph(nodeSp preNode) override {
+            inputNode_ = std::move(preNode);
+            init(inputNode_->getValue());
+            kernelNode_ = make_shared<Identity>(kernel_, kernelGrads_);
+            biasNode_ = make_shared<Identity>(bias_, biasGrads_);
             convNode_ = make_shared<Conv>(
-                    nodes{preLayer->getOutputNode(), kernelNode_},
+                    nodes{inputNode_, kernelNode_},
                     outputH_,
                     outputW_,
                     filterDesc_,
@@ -440,7 +449,7 @@ namespace cuDL {
                     workspace_,
                     workspaceSize_,
                     cuda_);
-            outputNode_ = make_shared<Add>(nodes{convNode_, biasNode_}, cuda_, 1, 1);
+            outputNode_ = make_shared<Add>(nodes{convNode_, biasNode_}, 1, 1);
         }
 
 
@@ -534,8 +543,8 @@ namespace cuDL {
             return inputGrads_;
         }
 
-        void makeGraph(std::shared_ptr<Layer> preLayer) {
-            inputNode_ = preLayer->getOutputNode();
+        void makeGraph(nodeSp preNode) override {
+            inputNode_ = std::move(preNode);
             init(inputNode_->getValue());
             outputNode_ = make_shared<Pooling>(nodes{inputNode_},
                                                inputs_,
@@ -604,13 +613,14 @@ namespace cuDL {
             return outputs_;
         }
 
-        void makeGraph(std::shared_ptr<Layer> preLayer) {
-            init(preLayer->getOutputNode()->getValue());
-            exp_ = make_shared<Exp>(nodes{preLayer->getOutputNode()}, cuda_);
-            sum_ = make_shared<Sum>(nodes{exp_}, cuda_);
-            reciprocal_ = make_shared<Pow>(nodes{sum_}, -1, cuda_);
-            expand_ = make_shared<Expand>(nodes{reciprocal_}, inputs_->size(), cuda_);
-            outputNode_ = make_shared<Mul>(nodes{exp_, expand_}, cuda_);
+        void makeGraph(nodeSp preNode) override {
+            inputNode_ = std::move(preNode);
+            init(inputNode_->getValue());
+            exp_ = make_shared<Exp>(nodes{inputNode_});
+            sum_ = make_shared<Sum>(nodes{exp_});
+            reciprocal_ = make_shared<Pow>(nodes{sum_}, -1);
+            expand_ = make_shared<Expand>(nodes{reciprocal_}, inputs_->size());
+            outputNode_ = make_shared<Mul>(nodes{exp_, expand_});
         }
 
         float getLoss(const tensorSp &labels) {
@@ -652,6 +662,48 @@ namespace cuDL {
             printf("\ninputGrads:");
             if (inputGrads_ != nullptr) inputGrads_->print();
             else printf("not init yet\n");
+        }
+    };
+
+    class CrossEntropy: Layer {
+    private:
+        nodeSp labelNode_ = nullptr;
+        nodeSp logitsNode_ = nullptr;
+        shared_ptr<Executor> executor_ = nullptr;
+
+        void init(tensorSp inputs) override {}
+
+        tensorSp forward(tensorSp inputs) override {}
+
+        tensorSp backward(cuDL::tensorSp grads) override {}
+
+        void makeGraph(nodeSp preNode) override {}
+
+    public:
+        CrossEntropy(shared_ptr<CudaContext> cuda) {
+            name_ = "CrossEntropy_" + std::to_string(globalID++);
+            cuda_ = std::move(cuda);
+            labelNode_ = make_shared<Identity>();
+            logitsNode_ = make_shared<Identity>();
+            auto ln = make_shared<Ln>(nodes{logitsNode_});
+            auto mul = make_shared<Mul>(nodes{ln, labelNode_});
+            outputNode_ = make_shared<Sum>(nodes{mul}, -1);
+            executor_ = make_shared<Executor>(outputNode_, cuda_);
+        }
+
+        tensorSp getLoss(tensorSp logits, tensorSp labels) {
+            labelNode_->setValue(std::move(labels));
+            logitsNode_->setValue(std::move(logits));
+            return executor_->forward();
+        }
+
+        tensorSp backward() {
+            if (inputGrads_ == nullptr) {
+                inputGrads_ = make_shared<Tensor>(1, 1, 1, 1);
+                inputGrads_->valueInit(1);
+            }
+            executor_->backward(inputGrads_);
+            return logitsNode_->getGrad();
         }
     };
 
@@ -706,8 +758,8 @@ namespace cuDL {
             return inputGrads_;
         }
 
-        void makeGraph(shared_ptr<Layer> preLayer) override {
-            inputNode_ = preLayer->getOutputNode();
+        void makeGraph(nodeSp preNode) override {
+            inputNode_ = std::move(preNode);
             init(inputNode_->getValue());
             outputNode_ = make_shared<Active>(nodes{inputNode_},
                                               inputs_,
@@ -790,22 +842,27 @@ namespace cuDL {
             return nullptr;
         }
 
-        void makeGraph(shared_ptr<Layer> preLayer) override {
-            init(preLayer->getOutputNode()->getValue());
-            inputNode_ = preLayer->getOutputNode();
-            alphaNode_ = make_shared<Identity>(alpha_, cuda_);
-            betaNode_ = make_shared<Identity>(beta_, cuda_);
-
-            auto mean = make_shared<Sum>(nodes{inputNode_}, cuda_, 1 / inputNode_->getValue()->size());
-            auto meanVector = make_shared<Expand>(nodes{mean}, inputNode_->getValue()->size(), cuda_);
-            auto xSubMean = make_shared<Add>(nodes{inputNode_, meanVector}, cuda_, 1, -1);
-            auto var = make_shared<Sum>(nodes{xSubMean}, cuda_, 1 / inputNode_->getValue()->size(), 0.f, 2.f);
-            auto reStd = make_shared<Pow>(nodes{var}, -0.5, cuda_);
-            auto alpha = make_shared<Mul>(nodes{alphaNode_, reStd}, cuda_);
-            auto aVec = make_shared<Expand>(nodes{alpha}, inputNode_->getValue()->size(), cuda_);
-            auto norm = make_shared<Mul>(nodes{aVec, xSubMean}, cuda_);
-            auto bVec = make_shared<Expand>(nodes{betaNode_}, inputNode_->getValue()->size(), cuda_);
-            outputNode_ = make_shared<Add>(nodes{norm, bVec}, cuda_);
+        void makeGraph(nodeSp preNode) override {
+            inputNode_ = std::move(preNode);
+            init(inputNode_->getValue());
+            int n = inputNode_->getValue()->size();
+            /**                                      a            β -> expand
+             *                                       |                    |
+             *  / sum -> expand \    / sum -> pow -> mul -> expand \      |
+             * x ---------------> add ---------------------------> mul-> add -> out
+             */
+            alphaNode_ = make_shared<Identity>(alpha_);
+            betaNode_ = make_shared<Identity>(beta_);
+            auto mean = make_shared<Sum>(nodes{inputNode_}, 1 / n);
+            auto meanVector = make_shared<Expand>(nodes{mean}, n);
+            auto xSubMean = make_shared<Add>(nodes{inputNode_, meanVector}, 1, -1);
+            auto var = make_shared<Sum>(nodes{xSubMean}, 1 / n, 0.f, 2.f);
+            auto reStd = make_shared<Pow>(nodes{var}, -0.5);
+            auto alpha = make_shared<Mul>(nodes{alphaNode_, reStd});
+            auto aVec = make_shared<Expand>(nodes{alpha}, n);
+            auto norm = make_shared<Mul>(nodes{aVec, xSubMean});
+            auto bVec = make_shared<Expand>(nodes{betaNode_}, n);
+            outputNode_ = make_shared<Add>(nodes{norm, bVec});
         }
 
         ~BatchNorm() = default;

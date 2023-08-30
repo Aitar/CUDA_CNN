@@ -1,0 +1,3 @@
+# CUDA_CNN
+一个简单的AI框架实现
+实现了autograd和Layer两种模式的计算以及对应算子

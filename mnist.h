@@ -113,22 +113,9 @@ namespace cuDL{
             addLayer("max_pool", std::make_shared<MaxPooling>(3));
             addLayer("relu1", std::make_shared<ReLU>());
             addLayer("relu2", std::make_shared<ReLU>());
-            addLayer("fc", std::make_shared<Linear>(1152, 10));
+            addLayer("fc", std::make_shared<Linear>(1152, nClass_));
             addLayer("bn2", std::make_shared<BatchNorm>());
             addLayer("softmax", loss_);
-//            addLayer("conv1", std::make_shared<Conv2D>(1, 6, 5));
-//            addLayer("bn1", std::make_shared<BatchNorm>());
-//            addLayer("max_pool1", std::make_shared<MaxPooling>(3));
-//            addLayer("relu1", std::make_shared<ReLU>());
-//            addLayer("conv2", std::make_shared<Conv2D>(6, 2, 5));
-//            addLayer("bn2", std::make_shared<BatchNorm>());
-//            addLayer("max_pool2", std::make_shared<MaxPooling>(3));
-//            addLayer("relu2", std::make_shared<ReLU>());
-//            addLayer("fc1", std::make_shared<Linear>(512, 256));
-//            addLayer("relu3", std::make_shared<ReLU>());
-//            addLayer("bn3", std::make_shared<BatchNorm>());
-//            addLayer("fc2", std::make_shared<Linear>(256, nClass_));
-//            addLayer("softmax", loss_);
         }
 
         std::shared_ptr <Tensor> forward(std::shared_ptr<Tensor> input) override {
@@ -144,19 +131,6 @@ namespace cuDL{
             connect("fc", "relu2");
             connect("relu2", "bn2");
             connect("bn2", "softmax");
-
-//            connect( "input", "conv1");
-//            connect("conv1", "bn1");
-//            connect("bn1", "max_pool1");
-//            connect("max_pool1", "relu1");
-//            connect("relu1", "conv2");
-//            connect("conv2", "bn2");
-//            connect("bn2", "max_pool2");
-//            connect("max_pool2", "fc1");
-//            connect("fc1", "relu3");
-//            connect("relu3", "bn3");
-//            connect("bn3", "fc2");
-//            connect("fc2", "softmax");
         }
     };
 

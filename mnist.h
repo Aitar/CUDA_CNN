@@ -108,30 +108,55 @@ namespace cuDL{
 
         Net(int nClass) : nClass_(nClass) {
             loss_ = std::make_shared<Softmax>();
-            addLayer("conv1", std::make_shared<Conv2D>(1, 6, 5));
-            addLayer("max_pool1", std::make_shared<MaxPooling>(3));
+            addLayer("conv", std::make_shared<Conv2D>(1, 2, 3));
+            addLayer("bn1", std::make_shared<BatchNorm>());
+            addLayer("max_pool", std::make_shared<MaxPooling>(3));
             addLayer("relu1", std::make_shared<ReLU>());
-            addLayer("conv2", std::make_shared<Conv2D>(6, 2, 5));
-            addLayer("max_pool2", std::make_shared<MaxPooling>(3));
             addLayer("relu2", std::make_shared<ReLU>());
-            addLayer("fc1", std::make_shared<Linear>(512, 256));
-            addLayer("relu3", std::make_shared<ReLU>());
-            addLayer("fc2", std::make_shared<Linear>(256, nClass));
+            addLayer("fc", std::make_shared<Linear>(1152, 10));
+            addLayer("bn2", std::make_shared<BatchNorm>());
             addLayer("softmax", loss_);
+//            addLayer("conv1", std::make_shared<Conv2D>(1, 6, 5));
+//            addLayer("bn1", std::make_shared<BatchNorm>());
+//            addLayer("max_pool1", std::make_shared<MaxPooling>(3));
+//            addLayer("relu1", std::make_shared<ReLU>());
+//            addLayer("conv2", std::make_shared<Conv2D>(6, 2, 5));
+//            addLayer("bn2", std::make_shared<BatchNorm>());
+//            addLayer("max_pool2", std::make_shared<MaxPooling>(3));
+//            addLayer("relu2", std::make_shared<ReLU>());
+//            addLayer("fc1", std::make_shared<Linear>(512, 256));
+//            addLayer("relu3", std::make_shared<ReLU>());
+//            addLayer("bn3", std::make_shared<BatchNorm>());
+//            addLayer("fc2", std::make_shared<Linear>(256, nClass_));
+//            addLayer("softmax", loss_);
         }
 
-        std::shared_ptr <Tensor> forward(std::shared_ptr <Tensor> input) override {
-            return Module::forward(input);
+        std::shared_ptr <Tensor> forward(std::shared_ptr<Tensor> input) override {
+            return Module::forward(std::move(input));
         }
 
-        nodeSp forward(nodeSp input) {
-            getLayer("conv1")->makeGraph(std::move(input));
-            getLayer("max_pool1")->makeGraph(getLayer("conv1")->getOutputNode());
-            getLayer("conv1")->makeGraph(std::move(input));
-            getLayer("conv1")->makeGraph(std::move(input));
-            getLayer("conv1")->makeGraph(std::move(input));
-            getLayer("conv1")->makeGraph(std::move(input));
-            getLayer("conv1")->makeGraph(std::move(input));
+        void makeGraph() override {
+            connect( "input", "conv");
+            connect("conv", "bn1");
+            connect("bn1", "relu1");
+            connect("relu1", "max_pool");
+            connect("max_pool", "fc");
+            connect("fc", "relu2");
+            connect("relu2", "bn2");
+            connect("bn2", "softmax");
+
+//            connect( "input", "conv1");
+//            connect("conv1", "bn1");
+//            connect("bn1", "max_pool1");
+//            connect("max_pool1", "relu1");
+//            connect("relu1", "conv2");
+//            connect("conv2", "bn2");
+//            connect("bn2", "max_pool2");
+//            connect("max_pool2", "fc1");
+//            connect("fc1", "relu3");
+//            connect("relu3", "bn3");
+//            connect("bn3", "fc2");
+//            connect("fc2", "softmax");
         }
     };
 

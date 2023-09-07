@@ -13,6 +13,7 @@ set(CUDNN_INCLUDE_DIR /nfs/volume-73-1/huangdingli/my_workspace/cuda/cudnn/inclu
 set(CUDNN_LIBRARY /nfs/volume-73-1/huangdingli/my_workspace/cuda/cudnn/lib)
 set(CUDA_INCLUDE /usr/local/cuda-11.3/include)
 set(CUDA_LIB /usr/local/cuda-11.3/lib64)
+
 include_directories(${CUDNN_INCLUDE_DIR})
 include_directories(${CUDA_INCLUDE})
 link_directories(${CUDNN_LIBRARY})
@@ -30,5 +31,3 @@ add_executable(cuda_cnn main.cu
 )
 
 target_link_libraries(cuda_cnn cudnn cublas)
-
-#set_target_properties(cuda_cnn PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

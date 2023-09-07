@@ -10,10 +10,6 @@ static const int IPT = 4;
 static const int IPT_SHIFE = 2;
 static const int BLOCKSIZE = 512;
 static const int BLOCKSHIFE = 9;
-static const int BY = 32;
-static const int BX = 16;
-static const int YSHIFE = 5;
-static const int XSHIFE = 4;
 
 
 namespace cuDL {
@@ -57,17 +53,14 @@ namespace cuDL {
         uint idx = blockIdx.x * blockDim.x + threadIdx.x;
         extern __shared__ float smem[];
         float input[IPT] = {0.f};
-        float buf[IPT] = {0.f};
 
-        // 这里很容易错，记住 i = idx * 4
-        for (uint i = idx * 4; i < n; i += nThread * 4) {
-            for (int step = 0; step < 4; ++step) {
-                buf[step] = i + step < n ? x[i + step] : 0.f;
-                input[step] += pow(buf[step] - bias, p);
-            }
+        // 这里很容易错，记住 i = idx * IPT
+        for (uint i = idx * IPT; i < n; i += nThread * IPT) {
+            for (int step = 0; step < IPT; ++step)
+                input[step] += i + step < n ? pow(x[i + step] + bias, p) : 0.f;
         }
 
-        for (int step = 1; step < 4; ++step)
+        for (uint step = 1; step < IPT; ++step)
             input[0] += input[step];
         smem[threadIdx.x] = input[0];
         __syncthreads();
@@ -86,26 +79,23 @@ namespace cuDL {
     }
 
     void vectorSum(float* x, float* res, int n, float alpha=1.f, float bias=0.f, float p=1.f, cudaStream_t stream=nullptr) {
-        float* copy = nullptr;
-        CUDACHECK(cudaMallocAsync(&copy, sizeof(float) * n, stream));
-        CUDACHECK(cudaMemcpyAsync(copy, x, sizeof(float) * n, cudaMemcpyDeviceToDevice, stream));
+        float* copy;
+        CUDACHECK(cudaMalloc(&copy, sizeof(float) * n));
+        CUDACHECK(cudaMemcpy(copy, x, sizeof(float) * n, cudaMemcpyDeviceToDevice));
 
-        int blockSize = BLOCKSIZE;
+        int blockSize = 256;
         int gridSize;
+        bool first = true;
         while (n > 1) {
-            gridSize = n / (blockSize * IPT);
-            if (gridSize < 1) {
-                blockSize = n / IPT;
-                gridSize = 1;
-            }
-            vectorSumKernel<<<gridSize, blockSize, blockSize, stream>>>(copy, n, alpha, bias, p);
+            gridSize = n / (blockSize * IPT) + 1;
+            if (first) vectorSumKernel<<<gridSize, blockSize, blockSize, stream>>>(copy, n, alpha, bias, p);
+            else vectorSumKernel<<<gridSize, blockSize, blockSize, stream>>>(copy, n, alpha, 0.f, 1.f);
+            cudaStreamSynchronize(stream);
+            first = false;
             n = gridSize;
         }
-        cudaMemcpyAsync(res, copy, sizeof(float), cudaMemcpyDeviceToDevice, stream);
-        CUDACHECK(cudaStreamSynchronize(stream));
+        cudaMemcpy(res, copy, sizeof(float), cudaMemcpyDeviceToHost);
     }
-
-
 
     __global__ void reduceSumExpKernel(float* x, int n) {
         uint nThread = blockIdx.x * blockDim.x;
@@ -142,8 +132,8 @@ namespace cuDL {
     float reduceSumExpVector(float* x, int n, cudaStream_t stream=0) {
         float* copy = nullptr;
         float out = 0.f;
-        cudaMallocAsync(&copy, sizeof(float) * n, stream);
-        cudaMemcpyAsync(copy, x, sizeof(float) * n, cudaMemcpyDeviceToDevice, stream);
+        cudaMalloc(&copy, sizeof(float) * n);
+        cudaMemcpy(copy, x, sizeof(float) * n, cudaMemcpyDeviceToDevice);
 
         int blockSize = BLOCKSIZE;
         int gridSize;
@@ -158,7 +148,7 @@ namespace cuDL {
         blockSize = (curSize / IPT) + 1;
         reduceSumExpKernel<<<1, blockSize, blockSize, stream>>>(copy, curSize);
 
-        cudaMemcpyAsync(&out, copy, sizeof(float), cudaMemcpyDeviceToHost, stream);
+        cudaMemcpy(&out, copy, sizeof(float), cudaMemcpyDeviceToHost);
 
         cudaStreamSynchronize(stream);
 
@@ -166,32 +156,30 @@ namespace cuDL {
     }
 
 
-    __global__ void vectorAddKernel(float alpha, const float* x, float beta, float* y, int n) {
+    __global__ void vectorAddKernel(float alpha, const float* x, float beta, float* y, float* z, int n) {
         uint idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx << IPT_SHIFE < n) {
+        uint offset = idx << IPT_SHIFE;
+        if (offset < n) {
             float xTmp[IPT];
             float yTmp[IPT];
 
             for (int step = 0; step < IPT; ++step) {
-                yTmp[step] = y[(idx << IPT_SHIFE) + step];
-                xTmp[step] = x[(idx << IPT_SHIFE) + step];
-            }
-
-            for (int step = 0; step < IPT; ++step) {
+                yTmp[step] = y[offset + step];
+                xTmp[step] = x[offset + step];
                 yTmp[step] = alpha * xTmp[step] + beta * yTmp[step];
             }
 
             for (int step = 0; step < IPT; ++step) {
-                y[(idx << IPT_SHIFE) + step] = yTmp[step] > 0 ? yTmp[step] : 0.f;
+                z[offset + step] = yTmp[step];
             }
         }
     }
 
-    // y = alpha * x + beta * y
-    void vectorAdd(float alpha, const float* x, float beta, float* y, int n, cudaStream_t stream=0) {
+    // z = alpha * x + beta * y
+    void vectorAdd(float alpha, const float* x, float beta, float* y, float* z, int n, cudaStream_t stream=0) {
         int blockSize = BLOCKSIZE;
         int gridSize = n / (blockSize << IPT_SHIFE) + 1;
-        vectorAddKernel<<<gridSize, blockSize, 0, stream>>>(alpha, x, beta, y, n);
+        vectorAddKernel<<<gridSize, blockSize, 0, stream>>>(alpha, x, beta, y, z, n);
     }
 
     // x = alpha * x + beta
@@ -209,7 +197,7 @@ namespace cuDL {
         }
     }
 
-    void vectorValueAdd(float alpha, int n, float* x, float value, cudaStream_t stream=nullptr) {
+    void vectorValueAdd(float alpha, float* x, int n, float value, cudaStream_t stream=nullptr) {
         int blockSize = BLOCKSIZE;
         int gridSize = n / (blockSize * (IPT << 1)) + 1;
         vectorValueAddKernel<<<gridSize, blockSize, 0, stream>>>(alpha, x, value, n);
@@ -257,6 +245,33 @@ namespace cuDL {
         expKernel<<<gridSize, blockSize, 0, stream>>>(x, y, n);
     }
 
+    __global__ void pullToKernel(float* x, float minValue, float maxValue, int n) {
+        uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+        uint offset = idx * IPT;
+        if (offset < n) {
+            float a[IPT] = {0.f};
+            for (int i = 0; i < IPT && offset + i < n; ++i) {
+                a[i] = x[offset + i];
+                if (a[i] > 0) {
+                    a[i] = a[i] < minValue ? minValue : a[i];
+                    a[i] = a[i] > maxValue ? maxValue : a[i];
+                } else {
+                    minValue = -minValue;
+                    maxValue = -maxValue;
+                    a[i] = a[i] < maxValue ? maxValue : a[i];
+                    a[i] = a[i] > minValue ? minValue : a[i];
+                }
+                x[offset + i] = a[i];
+            }
+        }
+    }
+
+    void pullTo(float* x, float minValue, float maxValue, int n, cudaStream_t stream=nullptr) {
+        int blockSize = std::min(BLOCKSIZE, (n >> IPT_SHIFE) + 1);
+        int gridSize = n / (blockSize << IPT_SHIFE) + 1;
+        pullToKernel<<<gridSize, blockSize, 0, stream>>>(x, minValue, maxValue, n);
+    }
+
     __global__ void powKernel(const float* x, float* y, float p, int n) {
         uint idx = blockIdx.x * blockDim.x + threadIdx.x;
         uint offset = idx * IPT;
@@ -296,19 +311,16 @@ namespace cuDL {
         logKernel<<<gridSize, blockSize, 0, stream>>>(x, y, n);
     }
 
-    __global__ void setValueKernel(float* x, float value, int n) {
-        uint idx = blockIdx.x * blockDim.x + threadIdx.x;
-        uint offset = idx * IPT;
-        if (offset < n) {
-            for (int i = 0; i < IPT && offset + i < n; ++i)
-                x[offset + i] = value;
-        }
-    }
 
-    void setValue(float* x, float value, int n, cudaStream_t stream=nullptr) {
-        int blockSize = std::min(BLOCKSIZE, (n >> IPT_SHIFE) + 1);
-        int gridSize = n / (blockSize << IPT_SHIFE) + 1;
-        setValueKernel<<<gridSize, blockSize, 0, stream>>>(x, value, n);
+    void norm(const tensorSp& x) {
+        auto mean = std::make_shared<Tensor>(1);
+        auto var = std::make_shared<Tensor>(1);
+
+        vectorSum(x->gpu(), mean->gpu(), x->size(), 1.f/(float) x->size());
+        vectorSum(x->gpu(), var->gpu(), x->size(), 1.f/(float) x->size(), -mean->getItem(0), 2.f);
+        float std = std::pow(var->getItem(0) + 1e-5, -0.5);
+        mean->cpu()[0] *= std;
+        vectorValueAdd(std, x->gpu(), x->size(), -mean->getItem(0));
     }
 }
 

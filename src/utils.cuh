@@ -5,12 +5,20 @@
 #include <cublas_v2.h>
 #include <cudnn_v8.h>
 #include <memory>
+#include <sstream>
+#include <stdexcept>
+
 #include "Tensor.h"
 
 
 #define CUDACHECK(op) cudaCheck((op), #op, __FILE__, __LINE__)
 #define CUBLASCHECK(op) cublasCheck((op), #op, __FILE__, __LINE__)
 #define CUDNNCHECK(op) cudnnCheck((op), #op, __FILE__, __LINE__)
+#define NIL(ptr) checkNullptr((ptr), __FILE__, __LINE__)
+
+#define INFO(msg) logger((msg), 0)
+#define WARN(msg) logger((msg), 1)
+#define ERR(msg) logger((msg), 2)
 
 static const char* cublasGetErrorEnum(cublasStatus_t error) {
     switch (error) {
@@ -49,46 +57,68 @@ static const char* cublasGetErrorEnum(cublasStatus_t error) {
     }
 }
 
-bool cudaCheck(cudaError_t code, const char *op, const char *file, int line) {
+static int INFO_RANK = 0;
+
+void logger(std::basic_string<char, std::char_traits<char>, std::allocator<char>> msg, int type) {
+    if (type < INFO_RANK) return;
+    switch (type) {
+        case 0: // info
+            std::cout << "\033[32m[INFO] " << msg << "\033[0m" << std::endl;
+            break;
+
+        case 1: // warning
+            std::cout << "\033[33m[WARNING] " << msg << "\033[0m" << std::endl;
+            break;
+
+        case 2: // error
+            std::cout << "\033[31m[ERROR] " << msg << "\033[0m" << std::endl;
+            break;
+
+        default:
+            std::cout << msg << std::endl;
+    }
+}
+
+void cudaCheck(cudaError_t code, const char *op, const char *file, int line) {
     if (code != cudaSuccess) {
         const char *err_name = cudaGetErrorName(code);
         const char *err_message = cudaGetErrorString(code);
         printf("cuda runtime error %s:%d  %s failed. \n  code = %s, message = %s\n", file, line, op, err_name,
                err_message);
-        return false;
+        throw std::runtime_error("cuda_error");
     }
-    return true;
 }
 
-bool cublasCheck(cublasStatus_t code, const char *op, const char *file, int line) {
+void cublasCheck(cublasStatus_t code, const char *op, const char *file, int line) {
     if (code != CUBLAS_STATUS_SUCCESS) {
         const char *err_name = cublasGetErrorEnum(code);
         printf("cublas runtime error %s:%d  %s failed. \n  code = %s\n", file, line, op, err_name);
-        return false;
+        throw std::runtime_error("cublas_error");
     }
-    return true;
 }
 
-bool cudnnCheck(cudnnStatus_t code, const char *op, const char *file, int line) {
+void cudnnCheck(cudnnStatus_t code, const char *op, const char *file, int line) {
     if (code == CUDNN_STATUS_SUCCESS)
-        return true;
+        return;
+    std::stringstream ss;
     const char *err_name = cudnnGetErrorString(code);
-    printf("cudnn runtime error %s:%d  %s failed. \n  code = %s\n", file, line, op, err_name);
-    return false;
+    ss << "cudnn runtime error " << file << ":" << line << " " << op << " failed. \n  code = " << err_name <<"\n";
+    ERR(ss.str());
+    throw std::runtime_error("cudnn_error");
 }
 
-
+template <typename T>
+T checkNullptr(T ptr, const char *file, int line) {
+    if (ptr == nullptr) {
+        std::stringstream ss;
+        ss << "Null printer got at file " << file << ":" << line << ".";
+        ERR(ss.str());
+        exit(1);
+    }
+    return ptr;
+}
 
 namespace cuDL {
-    template <typename T>
-    std::shared_ptr<T> ckNullptr(std::shared_ptr<T> ptr) {
-        if (ptr == nullptr) {
-            std::cout << "[Error] Nullptr got." << std::endl;
-            exit(1);
-        }
-        return ptr;
-    }
-
     class CudaContext {
     public:
         cublasHandle_t cublas_{};
